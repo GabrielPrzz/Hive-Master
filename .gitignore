@@ -1,0 +1,39 @@
+# STM32CubeIDE / Eclipse metadata
+.metadata/
+.settings/
+*.launch
+*.log
+
+# Build output
+Debug/
+Release/
+build/
+*.o
+*.d
+*.elf
+*.map
+*.bin
+*.hex
+*.list
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*.swo
+*.swd
+*.pyc
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Backup and cache folders
+.cproject
+.project
+*.iws
+.idea/
+.vscode/
+
+# CubeMX generated backups
+*.ioc-backup
