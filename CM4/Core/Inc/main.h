@@ -74,16 +74,19 @@ void Error_Handler(void);
 #define RSSI_BUFFER_SIZE 		13
 #define HISTORY_SIZE 			4
 #define LORA_MAX_SIZE 			64
+#define MAX_HONEYCOMBS			1		//Se modifica con base a el tamaño del sistema, en este caso 3 balizas
 
 typedef enum {
-	NODE_ERROR,				//Alguno de los modulos, ajeno al LoRa fallo o no esta funcionando correctamente
-	SCAN,					//Solo escanendo el ambiente pero sin detectar nada todavia, funcionamiento normal
-	DETECTION,				//ALERTA previa a la triangulación, central debe confirmar recepcion de la alerta
-	TRIANGULATION,			//DRON DETECTADO y se estan mandando datos para la triangulacion
-	SLEEP_INCOMING,			//SLEEP INCOMING ALERTA
+	INITIALIZATION,
+	NODE_ERROR,							//Alguno de los modulos, ajeno al LoRa fallo o no esta funcionando correctamente
+	SCAN,								//Solo escanendo el ambiente pero sin detectar nada todavia, funcionamiento normal
+	DETECTION,							//ALERTA previa a la triangulación, central debe confirmar recepcion de la alerta
+	TRIANGULATION,						//DRON DETECTADO y se estan mandando datos para la triangulacion
+	SLEEP_INCOMING,						//SLEEP INCOMING ALERTA
+	SLEEPING,
 } BALIZA_STATE;
 
-typedef enum {				//Señales que avisan que tipo de dato mandamos
+typedef enum {							//Señales que avisan que tipo de dato mandamos
 	ENERGY,
 	GPS,
 	ALERT,
@@ -94,24 +97,49 @@ typedef struct {
 } scan_t;
 
 typedef struct {
-	uint8_t pending_tx;  //Flag que ayuda en transmision
-    uint8_t baliza_id;
-    BALIZA_STATE status;
+	float_t Voltage;
+	float_t Percentage;
+	float_t DischargeRate;
+} energy_t;
+
+typedef struct {						//Falta modificar
+    uint8_t latitude;
+} gps_t;
+
+typedef struct {
     TX_TYPE transmission_type;
-    uint8_t rx_buffer[LORA_MAX_SIZE];
-
+    energy_t energy_data;
     scan_t rssi_buffer[HISTORY_SIZE]; 	//Buffer que almacena HISTORY SIZE arreglos de las lecturas en los 13 canales
-
+    gps_t location_data;
 } lora_package;
 
 
-typedef struct { 			//States para verificación en las Bálizas
-	uint8_t LoRa_State;		//1 para errores, 0 para OK
+typedef struct { 						//States para verificación en las Bálizas
+	uint8_t LoRa_State;					//1 para errores, 0 para OK
 	uint8_t Esp32_State;
 	uint8_t GPS_State;
 	uint8_t Charger_State;
 	uint8_t Microphone_State;
 } MODULES;
+
+typedef struct {						//STRUCT DE ALMACENAMIENTO, NO DE CONTROL
+	uint8_t baliza_id;
+	BALIZA_STATE status;
+	MODULES devices_status;				//Variable que almacena el status de los devices de dicho nodo
+
+	lora_package honey_data;			//Variable utilizada para almacenar la info recibida por este nodo
+	uint8_t pending_ack;				//Indica si hay una transmisión pendiente HACIA ese slave, en init y en triang
+} HoneyComb_s;
+
+typedef struct {
+	uint8_t connected_honeycombs;
+	HoneyComb_s honeycombs[MAX_HONEYCOMBS];
+	uint8_t rx_buffer[LORA_MAX_SIZE];
+	uint8_t tx_buffer[LORA_MAX_SIZE];
+
+	uint8_t pending_tx;
+} Hive_Master;
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

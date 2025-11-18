@@ -65,7 +65,7 @@ UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
 LoRa myLoRa;
-lora_package rx_package;
+Hive_Master hiveMaster;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -75,11 +75,13 @@ static void MX_TIM3_Init(void);
 static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
 void print_debug(const char *msg);
+uint8_t master_add_node(Hive_Master* hive_master, uint8_t honey_comb_id);								//Funcion que agrega nodo a la lista
+uint8_t master_update_honeycomb(Hive_Master* hive_master, uint8_t rx_len);								//Funcion que actualiza honey data y status recibido
+void master_send_ack(LoRa* _Lora, Hive_Master* hive_master, uint8_t selected_node);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-uint8_t LoRa_status;
 /* USER CODE END 0 */
 
 /**
@@ -131,9 +133,8 @@ int main(void)
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Stop_IT(&htim3);
 	myLoRa = newLoRa(); 								//Inicializa el modulo LoRa con las configuraciones cargadas
-	LoRa_status = LoRa_connection(&myLoRa, &hspi1);
 
-	if(LoRa_status) {
+	if(LoRa_connection(&myLoRa, &hspi1)) {
 		//Funcion que prende buzzer
 		print_debug("ERROR: LoRa Failed\r\n");
 	} else {
@@ -146,6 +147,15 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  //Recepción constante esperando comando de conexión, recibe ID y status scan para validar existencia
+	  //Regresa acknowledge
+	  //Comienza recepción continua
+
+	  for(uint8_t i=0; i < hiveMaster.connected_honeycombs; i++) {
+		  if(hiveMaster.honeycombs[i].pending_ack) {
+			  master_send_ack(&myLoRa, &hiveMaster, i);
+		  }
+	  }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -176,7 +186,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_64;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -220,9 +230,9 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 199;
+  htim3.Init.Prescaler = 599;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 49999;
+  htim3.Init.Period = 58832;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
@@ -363,10 +373,97 @@ void print_debug(const char *msg) { //Funcion de debuggeo, posterior eliminació
     HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), 100);
 }
 
+uint8_t master_add_node(Hive_Master* hive_master, uint8_t honey_comb_id) {
+	//Buscamos que no exista
+	for (uint8_t i = 0; i < hive_master->connected_honeycombs; i++) {
+		if(honey_comb_id == hive_master->honeycombs[i].baliza_id) {
+			print_debug("ERROR: ID YA PRESENTE, ASIGNAR NUEVO A BALIZA\r\n");
+			return 0;
+		}
+	}
+
+	hive_master->honeycombs[hive_master->connected_honeycombs].baliza_id = honey_comb_id; //Se le asigna el ID a el siguiente honeycomb
+	hive_master->honeycombs[hive_master->connected_honeycombs].pending_ack = 1;			  //Le asignamos bandera para que en el siguiente tx se de ack
+	hive_master->connected_honeycombs++;												  //Aumentamos los nodos conectados
+	print_debug("Nueva baliza agregada \r\n");
+	return 1;
+}
+
+uint8_t master_update_honeycomb(Hive_Master* hive_master, uint8_t rx_len) {
+	uint8_t actual_id = 0;
+	//Identificamos primero el nodo a modificar
+
+	if(rx_len == LORA_ACK_PKG_SIZE) {
+		master_add_node(hive_master, hive_master->rx_buffer[0]);
+		return 1;
+	}
+	else {
+		for (uint8_t i = 0; i < hive_master->connected_honeycombs; i++) {
+			actual_id = hive_master->honeycombs[i].baliza_id;
+			if(hive_master->rx_buffer[0] == actual_id) {	//Si lo encontramos modificamos
+				//Identificamos que tipo de pkg es:
+				if(rx_len == LORA_ERROR_PKG_SIZE && (hive_master->rx_buffer[1] == NODE_ERROR)) {
+					//|ID|STATUS|ESP32_STATE|LORA_STATE|GPS_STATE|UNIT_STATE|MICRO_STATE|
+					hive_master->honeycombs[i].status = hive_master->rx_buffer[1];						//Cargamos el state
+					hive_master->honeycombs[i].devices_status.Esp32_State =	hive_master->rx_buffer[2];	//Cargamos la data
+					hive_master->honeycombs[i].devices_status.LoRa_State = hive_master->rx_buffer[3];
+					hive_master->honeycombs[i].devices_status.GPS_State = hive_master->rx_buffer[4];
+					hive_master->honeycombs[i].devices_status.Charger_State = hive_master->rx_buffer[5];
+					hive_master->honeycombs[i].devices_status.Microphone_State = hive_master->rx_buffer[6];
+				}
+				else if (rx_len == LORA_ENERGY_PKG_SIZE && (hive_master->rx_buffer[2] == ENERGY)) {
+					//Cargamos y actualizamos el struct de dicha baliza
+					hive_master->honeycombs[i].status = hive_master->rx_buffer[1];						//Cargamos el state
+				}
+				else if (rx_len == LORA_ALERT_PKG_SIZE && (hive_master->rx_buffer[2] == ALERT)) {
+					hive_master->honeycombs[i].status = hive_master->rx_buffer[1];						//Cargamos el state
+
+					if(hive_master->honeycombs[i].status == DETECTION) {
+						hive_master->honeycombs[i].pending_ack = 1;								//En la siguiente transmision se le avisa que sabemos pasara a triang
+					} else if (hive_master->honeycombs[i].status == SLEEP_INCOMING) {
+						//wake a la siguiente y cambiar state a sleep
+					}
+				}
+				else if (rx_len == LORA_GPS_PKG_SIZE && (hive_master->rx_buffer[2] == GPS)) {
+					hive_master->honeycombs[i].status = hive_master->rx_buffer[1];						//Cargamos el state
+					//Cargamos y actualizamos el struct de dicha baliza
+				}
+				else if (rx_len == LORA_TRIANG_PKG_SIZE && (hive_master->rx_buffer[1] == TRIANGULATION)) {
+					//Extraemos data y triangulamos con lo recibido
+					hive_master->honeycombs[i].status = hive_master->rx_buffer[1];						//Cargamos el state
+				}
+				else {
+					print_debug("No valid packet received\r\n");
+					return 0;
+				}
+				return 1;
+			}
+		}
+	}
+	print_debug("ERROR: No se encontró honeycomb con dicho ID \r\n");
+	return 0;
+}
+
+void master_send_ack(LoRa* _Lora, Hive_Master* hive_master, uint8_t selected_node) {
+	uint8_t aux_buffer[LORA_ACK_PKG_SIZE]; //ID-0xAA
+
+	aux_buffer[0] = hive_master->honeycombs[selected_node].baliza_id;
+	aux_buffer[1] = 0xAA;
+	//Aseguramos que nos escuche la honeycomb
+	for (uint8_t i=0; i<5 ;i++) {
+		LoRa_transmit(_Lora, aux_buffer, LORA_ACK_PKG_SIZE, 500);
+		HAL_Delay(10);
+	}
+	char msg[20];
+	sprintf(msg, "ACK enviado a %c \r\n", hive_master->honeycombs[selected_node].baliza_id);
+	print_debug(msg);
+	hive_master->honeycombs[selected_node].pending_ack = 0;
+}
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 	uint8_t rx_len = 0;
 	if (htim == &htim3) {
-		rx_len = LoRa_receive(&myLoRa, rx_package.rx_buffer, LORA_MAX_SIZE);
+		rx_len = LoRa_receive(&myLoRa, hiveMaster.rx_buffer, LORA_MAX_SIZE);
 
 		if(rx_len > 0) {
 			char msg[100];
@@ -374,10 +471,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 			print_debug(msg);
 
 			for(uint8_t i=0; i < rx_len; i++) {
-				sprintf(msg, "%c", rx_package.rx_buffer[i]);
+				sprintf(msg, "%c", hiveMaster.rx_buffer[i]);
 				print_debug(msg);
 			}
 			print_debug("\r\n");
+
+			master_update_honeycomb(&hiveMaster, rx_len);
 		} else {
 			print_debug("RX: No data\r\n");
 		}

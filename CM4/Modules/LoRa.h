@@ -80,6 +80,8 @@
 #define LORA_UNAVAILABLE		503
 
 // Transmission limits
+#define LORA_MAX_SIZE 			64
+#define LORA_ACK_PKG_SIZE		2
 #define LORA_ERROR_PKG_SIZE		6
 #define LORA_ENERGY_PKG_SIZE	6
 #define LORA_ALERT_PKG_SIZE		5
@@ -133,9 +135,5 @@ void LoRa_receive_IT(LoRa* _LoRa, uint8_t* data, uint8_t length);
 int LoRa_getRSSI(LoRa* _LoRa);
 
 uint16_t LoRa_init(LoRa* _LoRa);
-uint8_t LoRa_connection(LoRa* _LoRa, SPI_HandleTypeDef* _hSPIx); //Funcion creada para iniciar y verificar LoRa
-
-void LoRa_transmit_error_pkg(LoRa* _LoRa, lora_package* transmission, MODULES* device_state);
-void LoRa_transmit_scan_pkg(LoRa* _LoRa, lora_package* transmission, TX_TYPE transmission_type);
-void LoRa_transmit_triang_pkg(LoRa* _LoRa, lora_package* transmission);
+uint8_t LoRa_connection(LoRa* _LoRa, SPI_HandleTypeDef* _hSPIx); 								//Funcion creada para iniciar y verificar LoRa
 
