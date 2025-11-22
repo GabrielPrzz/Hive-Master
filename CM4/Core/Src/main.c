@@ -75,7 +75,8 @@ static void MX_TIM3_Init(void);
 static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
 void print_debug(const char *msg);
-uint8_t master_add_node(Hive_Master* hive_master, uint8_t honey_comb_id);								//Funcion que agrega nodo a la lista
+uint8_t master_add_node(Hive_Master* hive_master, uint8_t honey_comb_id, uint8_t status);								//Funcion que agrega nodo a la lista
+void master_remove_node(Hive_Master* hive_master, uint8_t node_index);									//Funcion que remueve nodo
 uint8_t master_update_honeycomb(Hive_Master* hive_master, uint8_t rx_len);								//Funcion que actualiza honey data y status recibido
 void master_send_ack(LoRa* _Lora, Hive_Master* hive_master, uint8_t selected_node);
 /* USER CODE END PFP */
@@ -373,20 +374,34 @@ void print_debug(const char *msg) { //Funcion de debuggeo, posterior eliminació
     HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), 100);
 }
 
-uint8_t master_add_node(Hive_Master* hive_master, uint8_t honey_comb_id) {
-	//Buscamos que no exista
-	for (uint8_t i = 0; i < hive_master->connected_honeycombs; i++) {
-		if(honey_comb_id == hive_master->honeycombs[i].baliza_id) {
-			print_debug("ERROR: ID YA PRESENTE, ASIGNAR NUEVO A BALIZA\r\n");
-			return 0;
-		}
-	}
+uint8_t master_add_node(Hive_Master* hive_master, uint8_t honey_comb_id, uint8_t status) {
+    for (uint8_t i = 0; i < hive_master->connected_honeycombs; i++) {
+        if(honey_comb_id == hive_master->honeycombs[i].baliza_id) {
+            print_debug("ERROR: ID duplicado\r\n");
+            return 0;
+        }
+    }
 
 	hive_master->honeycombs[hive_master->connected_honeycombs].baliza_id = honey_comb_id; //Se le asigna el ID a el siguiente honeycomb
+	hive_master->honeycombs[hive_master->connected_honeycombs].status = status;
 	hive_master->honeycombs[hive_master->connected_honeycombs].pending_ack = 1;			  //Le asignamos bandera para que en el siguiente tx se de ack
 	hive_master->connected_honeycombs++;												  //Aumentamos los nodos conectados
 	print_debug("Nueva baliza agregada \r\n");
 	return 1;
+}
+
+void master_remove_node(Hive_Master* hive_master, uint8_t node_index) {
+    char msg[50];
+    sprintf(msg, "Removing node ID=%d (ERROR)\r\n", hive_master->honeycombs[node_index].baliza_id);
+    print_debug(msg);
+
+    //Desplazar elementos
+    for(uint8_t i = node_index; i < hive_master->connected_honeycombs - 1; i++) {
+        hive_master->honeycombs[i] = hive_master->honeycombs[i+1];
+    }
+
+    memset(&hive_master->honeycombs[hive_master->connected_honeycombs - 1], 0, sizeof(HoneyComb_s));
+    hive_master->connected_honeycombs--;
 }
 
 uint8_t master_update_honeycomb(Hive_Master* hive_master, uint8_t rx_len) {
@@ -394,8 +409,32 @@ uint8_t master_update_honeycomb(Hive_Master* hive_master, uint8_t rx_len) {
 	//Identificamos primero el nodo a modificar
 
 	if(rx_len == LORA_ACK_PKG_SIZE) {
-		master_add_node(hive_master, hive_master->rx_buffer[0]);
-		return 1;
+
+		//Verificamos si el ID que llego ya existe
+		for (uint8_t i = 0; i < hive_master->connected_honeycombs; i++) {
+			if(hive_master->rx_buffer[0] == hive_master->honeycombs[i].baliza_id) {
+
+				//Si ya existe pero esta en error, es una reconexion, eliminamos y ponemos esta nueva conexion
+				if(hive_master->honeycombs[i].status == NODE_ERROR && (hive_master->rx_buffer[1] == INITIALIZATION)) {
+					char msg[40];
+					sprintf(msg, "Reconexión de báliza con ID: %c \r\n", hive_master->rx_buffer[0]);
+					print_debug(msg);
+					master_remove_node(hive_master, i); //Removemos
+					//Agregamos reconexion limpia
+					return master_add_node(hive_master, hive_master->rx_buffer[0], hive_master->rx_buffer[1]);
+				}
+				else {
+					print_debug("ERROR: ID YA PRESENTE O RECONEXION CON ERROR\r\n");
+					return 0;
+				}
+			}
+		}
+
+		//Agregamos si no existe y si hay espacio
+		if(hive_master->connected_honeycombs == MAX_HONEYCOMBS) { //Checamos si podemos agregar
+			print_debug("Hive lleno\r\n");
+		}
+		return master_add_node(hive_master, hive_master->rx_buffer[0], hive_master->rx_buffer[1]);
 	}
 	else {
 		for (uint8_t i = 0; i < hive_master->connected_honeycombs; i++) {
@@ -410,6 +449,7 @@ uint8_t master_update_honeycomb(Hive_Master* hive_master, uint8_t rx_len) {
 					hive_master->honeycombs[i].devices_status.GPS_State = hive_master->rx_buffer[4];
 					hive_master->honeycombs[i].devices_status.Charger_State = hive_master->rx_buffer[5];
 					hive_master->honeycombs[i].devices_status.Microphone_State = hive_master->rx_buffer[6];
+					return 1;
 				}
 				else if (rx_len == LORA_ENERGY_PKG_SIZE && (hive_master->rx_buffer[2] == ENERGY)) {
 					//Cargamos y actualizamos el struct de dicha baliza
@@ -436,7 +476,7 @@ uint8_t master_update_honeycomb(Hive_Master* hive_master, uint8_t rx_len) {
 					print_debug("No valid packet received\r\n");
 					return 0;
 				}
-				return 1;
+			return 1;
 			}
 		}
 	}
@@ -449,11 +489,8 @@ void master_send_ack(LoRa* _Lora, Hive_Master* hive_master, uint8_t selected_nod
 
 	aux_buffer[0] = hive_master->honeycombs[selected_node].baliza_id;
 	aux_buffer[1] = 0xAA;
-	//Aseguramos que nos escuche la honeycomb
-	for (uint8_t i=0; i<5 ;i++) {
-		LoRa_transmit(_Lora, aux_buffer, LORA_ACK_PKG_SIZE, 500);
-		HAL_Delay(10);
-	}
+	LoRa_transmit(_Lora, aux_buffer, LORA_ACK_PKG_SIZE, 500);
+	HAL_Delay(100);
 	char msg[20];
 	sprintf(msg, "ACK enviado a %c \r\n", hive_master->honeycombs[selected_node].baliza_id);
 	print_debug(msg);
@@ -471,8 +508,14 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 			print_debug(msg);
 
 			for(uint8_t i=0; i < rx_len; i++) {
-				sprintf(msg, "%c", hiveMaster.rx_buffer[i]);
-				print_debug(msg);
+				if(i==0) { //No alteres ID
+					sprintf(msg, "%c", hiveMaster.rx_buffer[i]);
+					print_debug(msg);
+				}
+				else {
+					sprintf(msg, "%c", 48+hiveMaster.rx_buffer[i]);
+					print_debug(msg);
+				}
 			}
 			print_debug("\r\n");
 
