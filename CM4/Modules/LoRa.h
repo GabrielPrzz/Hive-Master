@@ -80,13 +80,6 @@
 #define LORA_UNAVAILABLE		503
 
 // Transmission limits
-#define LORA_MAX_SIZE 			64
-#define LORA_ACK_PKG_SIZE		2
-#define LORA_ERROR_PKG_SIZE		6
-#define LORA_ENERGY_PKG_SIZE	6
-#define LORA_ALERT_PKG_SIZE		5
-#define LORA_GPS_PKG_SIZE		15	//Falta por cambiar
-#define LORA_TRIANG_PKG_SIZE 	54 	//Contemplando ID y status
 
 typedef struct LoRa_setting{
 	// Hardware setings:

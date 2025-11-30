@@ -72,9 +72,36 @@ void Error_Handler(void);
 
 /* USER CODE BEGIN Private defines */
 #define RSSI_BUFFER_SIZE 		13
-#define HISTORY_SIZE 			4
+#define MAX_HONEYCOMBS			3		//Se modifica con base a el tamaño del sistema, en este caso 3 balizas
+
 #define LORA_MAX_SIZE 			64
-#define MAX_HONEYCOMBS			1		//Se modifica con base a el tamaño del sistema, en este caso 3 balizas
+#define LORA_MASTER_CONNECTION_PKG_SIZE 2
+#define LORA_ACK_PKG_SIZE		3	//|ID|OxAA|role|
+#define LORA_ERROR_PKG_SIZE		7
+#define LORA_ENERGY_PKG_SIZE	15
+#define LORA_ALERT_PKG_SIZE		3
+#define LORA_GPS_PKG_SIZE		11
+#define LORA_TRIANG_PKG_SIZE 	15
+
+//CONNECTION_PKG ID|INITIALIZATION|														-RESPONSE
+//ERROR PKG 	 ID|NODE_ERROR|ESP32_STATE|LORA_STATE|GPS_STATE|UNIT_STATE|MICRO_STATE|
+//ENERGY PKG	 ID|SCAN|ENERGY|VOLTAGE|PERCENTAGE|RATE_OF_DISCHARGE|
+//GPS PKG		 ID|SCAN|GPS|LAT0|LAT1|LAT2|LAT3|LON0|LON1|LON2|LON3|
+//DETECTION PKG  ID|DETECTION|ALERT|													-RESPONSE
+//SLEEPING PKG   ID|SLEEPING|ALERT|
+//DRONE_LOST PKG ID|DRONE_LOST|ALERT|													-RESPONSE
+//TRIANG PKG	 ID|TRIANGULATION|RSSI[0]|RSSI[1]|...|RSSI[12]|
+typedef enum {
+	INVALID_PKG,
+    CONNECTION_PKG,
+    ERROR_PKG,
+    ENERGY_PKG,
+    GPS_PKG,
+    DETECTION_PKG,
+    SLEEPING_PKG,
+    DRONE_LOST_PKG,
+    TRIANG_PKG
+} msg_type;
 
 typedef enum {
 	INITIALIZATION,
@@ -82,7 +109,7 @@ typedef enum {
 	SCAN,								//Solo escanendo el ambiente pero sin detectar nada todavia, funcionamiento normal
 	DETECTION,							//ALERTA previa a la triangulación, central debe confirmar recepcion de la alerta
 	TRIANGULATION,						//DRON DETECTADO y se estan mandando datos para la triangulacion
-	SLEEP_INCOMING,						//SLEEP INCOMING ALERTA
+	DRONE_LOST,
 	SLEEPING,
 } BALIZA_STATE;
 
@@ -91,6 +118,11 @@ typedef enum {							//Señales que avisan que tipo de dato mandamos
 	GPS,
 	ALERT,
 } TX_TYPE;
+
+typedef enum {							//Señales que avisan que tipo de dato mandamos
+	detector,
+	aux,
+} system_role;
 
 typedef struct {
     int8_t rssi[RSSI_BUFFER_SIZE]; 		//Este rssi sirve para detectar dron
@@ -102,14 +134,14 @@ typedef struct {
 	float_t DischargeRate;
 } energy_t;
 
-typedef struct {						//Falta modificar
-    uint8_t latitude;
+typedef struct {
+	float_t latitude;
+	float_t longitude;
 } gps_t;
 
 typedef struct {
     TX_TYPE transmission_type;
     energy_t energy_data;
-    scan_t rssi_buffer[HISTORY_SIZE]; 	//Buffer que almacena HISTORY SIZE arreglos de las lecturas en los 13 canales
     gps_t location_data;
 } lora_package;
 
@@ -128,7 +160,7 @@ typedef struct {						//STRUCT DE ALMACENAMIENTO, NO DE CONTROL
 	MODULES devices_status;				//Variable que almacena el status de los devices de dicho nodo
 
 	lora_package honey_data;			//Variable utilizada para almacenar la info recibida por este nodo
-	uint8_t pending_ack;				//Indica si hay una transmisión pendiente HACIA ese slave, en init y en triang
+	system_role node_role;
 } HoneyComb_s;
 
 typedef struct {
@@ -139,6 +171,13 @@ typedef struct {
 
 	uint8_t pending_tx;
 } Hive_Master;
+
+typedef struct {
+    uint8_t msg_type;
+    uint8_t node_id;
+    uint8_t payload[LORA_ENERGY_PKG_SIZE]; //Se pone el size de pkg mas grande
+    uint8_t payload_len;
+} rx_message_t;
 
 /* USER CODE END Private defines */
 
