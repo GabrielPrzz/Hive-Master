@@ -134,6 +134,11 @@ osSemaphoreId_t cycleAlarmSemHandle;
 const osSemaphoreAttr_t cycleAlarmSem_attributes = {
   .name = "cycleAlarmSem"
 };
+/* Definitions for loraRxSem */
+osSemaphoreId_t loraRxSemHandle;
+const osSemaphoreAttr_t loraRxSem_attributes = {
+  .name = "loraRxSem"
+};
 /* USER CODE BEGIN PV */
 /* RTOS */
 
@@ -154,21 +159,21 @@ const osThreadAttr_t LoRa_Tx_Task_attributes = {
 osThreadId_t Node_Update_TaskHandle;
 const osThreadAttr_t Node_Update_Task_attributes = {
   .name = "Node_Update_Task",
-  .stack_size = 128 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
 
 osThreadId_t Node_Cycle_TaskHandle;
 const osThreadAttr_t Node_Cycle_Task_attributes = {
   .name = "Node_Cycle_Task",
-  .stack_size = 128 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
 osThreadId_t Update_Dashboard_TaskHandle;
 const osThreadAttr_t Update_Dashboard_Task_attributes = {
   .name = "Update_Dashboard_Task",
-  .stack_size = 128 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
 
@@ -204,6 +209,7 @@ uint8_t validate_message(uint8_t* buffer, uint8_t rx_len);
 void print_debug_F(const char *msg);
 void print_debug(const char *msg);
 void master_print_all_nodes(Hive_Master* hive_master);
+void debug_validate(uint8_t *buffer, uint8_t rx_len);
 /* FUNCTIONS */
 
 /* USER CODE END PFP */
@@ -302,6 +308,9 @@ int main(void)
 
   /* creation of cycleAlarmSem */
   cycleAlarmSemHandle = osSemaphoreNew(1, 0, &cycleAlarmSem_attributes);
+
+  /* creation of loraRxSem */
+  loraRxSemHandle = osSemaphoreNew(1, 0, &loraRxSem_attributes);
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   /* add semaphores, ... */
@@ -557,6 +566,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(LoRa_IRQ_GPIO_Port, &GPIO_InitStruct);
 
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
@@ -573,27 +586,30 @@ void Constant_Rx_Task(void *argument) {
 	rx_message_t aux_rx_message = {0};
 
 	for(;;) {
+		osDelay(20); //Cada 50 ms escuchamos entorno
 		rx_len = 0;
-		osMutexAcquire(loraMutexHandle, osWaitForever);
-		LoRa_startReceiving(&myLoRa);
-		osDelay(10);
-		rx_len = LoRa_receive(&myLoRa, hiveMaster.rx_buffer, LORA_MAX_SIZE); //Se pone el size del pkg mas grande
-		osMutexRelease(loraMutexHandle);
+		LoRa_gotoMode(&myLoRa, RXSINGLE_MODE);
+		if(osSemaphoreAcquire(loraRxSemHandle, 30) == osOK) {
+			osMutexAcquire(loraMutexHandle, osWaitForever);
+			rx_len = LoRa_receive_no_mode_change(&myLoRa, hiveMaster.rx_buffer, LORA_ENERGY_PKG_SIZE); //Se pone el size del pkg mas grande
+			LoRa_gotoMode(&myLoRa, SLEEP_MODE);
+			osMutexRelease(loraMutexHandle);
 
-		if(rx_len > 0) {
-			type = validate_message(hiveMaster.rx_buffer, rx_len);
-			if(type != INVALID_PKG) {
-				aux_rx_message.node_id = hiveMaster.rx_buffer[0];
-				aux_rx_message.msg_type = type;
-				memcpy(aux_rx_message.payload, &hiveMaster.rx_buffer[1], rx_len - 1); //Copia de status en adelante
-				aux_rx_message.payload_len = rx_len - 1;
-				osSemaphoreRelease(rxValidPacketSemHandle);
-				osMessageQueuePut(rxMsgQueueHandle, &aux_rx_message, 0, 0);
-			} else {
-				print_debug("Paquete invalido recibido\r\n"); //Me falta ponerle Mutex
+			if(rx_len > 0) {
+				debug_validate(hiveMaster.rx_buffer, rx_len);
+				type = validate_message(hiveMaster.rx_buffer, rx_len);
+				if(type != INVALID_PKG) {
+					aux_rx_message.node_id = hiveMaster.rx_buffer[0];
+					aux_rx_message.msg_type = type;
+					memcpy(aux_rx_message.payload, &hiveMaster.rx_buffer[1], rx_len - 1); //Copia de status en adelante
+					aux_rx_message.payload_len = rx_len - 1;
+					osSemaphoreRelease(rxValidPacketSemHandle);
+					osMessageQueuePut(rxMsgQueueHandle, &aux_rx_message, 0, 0);
+				} else {
+					print_debug("Paquete invalido recibido\r\n"); //Me falta ponerle Mutex
+				}
 			}
 		}
-		osDelay(100); //Cada 100 ms escuchamos entorno
 	}
 }
 
@@ -604,9 +620,9 @@ void LoRa_Tx_Task(void *argument) {
 	char debug_msg[50];
 
 	for(;;){
-		osDelay(1);
+		osDelay(50);
 		if (osMessageQueueGet(txCmdQueueHandle, &cmd, 0, osWaitForever) == osOK) {
-			if (osMessageQueueGet(txCmdQueueHandle, &honey_comb_index, 0, osWaitForever) == osOK) {
+			if (osMessageQueueGet(nodeIndexQueueHandle, &honey_comb_index, 0, osWaitForever) == osOK) {
 				osMutexAcquire(loraMutexHandle, osWaitForever);
 
 				osMutexAcquire(hiveMasterMutexHandle, osWaitForever);
@@ -695,6 +711,7 @@ void Node_Update_Task(void *argument) {
 			if(aux_rx_message.msg_type == CONNECTION_PKG) { 	//RESPONSE
 				//Verificar si el nodo ya existe
 				honey_comb_index = 0;
+				existing_node = 0;
 
 				for(uint8_t i = 0; i < hiveMaster.connected_honeycombs; i++) {
 					if(aux_rx_message.node_id == hiveMaster.honeycombs[i].baliza_id) {
@@ -729,14 +746,14 @@ void Node_Update_Task(void *argument) {
 						honey_comb_index = hiveMaster.connected_honeycombs;
 						hiveMaster.honeycombs[honey_comb_index].baliza_id = aux_rx_message.node_id;
 						hiveMaster.honeycombs[honey_comb_index].status = aux_rx_message.payload[0];
-						hiveMaster.connected_honeycombs++;
-
 						cmd = 0;	//CONNECTION ACK
 						osMessageQueuePut(txCmdQueueHandle, &cmd, 0, 0);
 						osMessageQueuePut(nodeIndexQueueHandle, &honey_comb_index, 0, 0);
 
-						sprintf(debug_msg, "UPDATE: Node%d ADDED (total: %d)\r\n", aux_rx_message.node_id, hiveMaster.connected_honeycombs);
+						sprintf(debug_msg, "UPDATE: Node%d ADDED (total: %d)\r\n", aux_rx_message.node_id, hiveMaster.connected_honeycombs + 1);
 						print_debug(debug_msg);
+
+						hiveMaster.connected_honeycombs++;
 					} else {
 						print_debug("UPDATE: Hive FULL, cannot add more nodes\r\n");
 					}
@@ -863,6 +880,8 @@ void Node_Update_Task(void *argument) {
 				//AVISAR A SEMAFORO HSEM PARA QUE TRIANGULES
 				print_debug("UPDATE: TRIANG PKG RECEIVED [HSEM SIGNAL PENDING]\r\n");
 			}
+
+			//master_print_all_nodes(&hiveMaster);
 			osMutexRelease(hiveMasterMutexHandle);
 		}
 		osDelay(50);
@@ -1022,6 +1041,28 @@ void master_print_all_nodes(Hive_Master* hive_master) {
         print_debug(msg);
     }
     print_debug("=== END HIVE ===\r\n\n");
+}
+
+void debug_validate(uint8_t *buffer, uint8_t rx_len) {
+	osMutexAcquire(printUartMutexHandle, osWaitForever);
+	char msg[100];
+	sprintf(msg, "DEBUG: ID=%d Status=%d Type=%d RxLen=%d\r\n",
+		buffer[0], buffer[1], buffer[2], rx_len);
+	HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), 100);
+
+	uint8_t valid_ids[] = VALID_NODE_IDS;
+	for(uint8_t i = 0; i < 3; i++) {
+		sprintf(msg, "ValidID[%d]=%d Match=%d\r\n", i, valid_ids[i], buffer[0]==valid_ids[i]);
+		HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), 100);
+	}
+	osMutexRelease(printUartMutexHandle);
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+	if (GPIO_Pin == LoRa_IRQ_Pin) {
+		osSemaphoreRelease(loraRxSemHandle);
+		print_debug_F("LORA_RX callback\r\n");
+	}
 }
 
 /* USER CODE END 4 */

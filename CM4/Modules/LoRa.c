@@ -508,6 +508,24 @@ uint8_t LoRa_receive(LoRa* _LoRa, uint8_t* data, uint8_t length){
     return min;
 }
 
+uint8_t LoRa_receive_no_mode_change(LoRa* _LoRa, uint8_t* data, uint8_t length){
+	uint8_t read;
+	uint8_t number_of_bytes;
+	uint8_t min = 0;
+
+	read = LoRa_read(_LoRa, RegIrqFlags);
+	if((read & 0x40) != 0){
+		LoRa_write(_LoRa, RegIrqFlags, 0xFF);
+		number_of_bytes = LoRa_read(_LoRa, RegRxNbBytes);
+		read = LoRa_read(_LoRa, RegFiFoRxCurrentAddr);
+		LoRa_write(_LoRa, RegFiFoAddPtr, read);
+		min = length >= number_of_bytes ? number_of_bytes : length;
+		for(int i=0; i<min; i++)
+			data[i] = LoRa_read(_LoRa, RegFiFo);
+	}
+	return min;
+}
+
 /* ----------------------------------------------------------------------------- *\
 		name        : LoRa_getRSSI
 
@@ -583,7 +601,7 @@ uint16_t LoRa_init(LoRa* _LoRa){
 
 		// DIO mapping:   --> DIO: RxDone
 			read = LoRa_read(_LoRa, RegDioMapping1);
-			data = read | 0x3F;
+			data = read & 0x3F;
 			LoRa_write(_LoRa, RegDioMapping1, data);
 
 		// goto standby mode:
