@@ -179,6 +179,17 @@ typedef struct {
     uint8_t payload_len;
 } rx_message_t;
 
+typedef struct {
+    uint8_t pending_cmd;        //Comando pendiente (0xFF = ninguno)
+    uint8_t pending_node_index; //Índice del nodo
+    uint8_t retry_count;        //Contador de reintentos
+} CentralRetxTracker;
+
+typedef struct {
+    uint8_t cmd;
+    uint8_t node_index;
+} TxCommand;
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
