@@ -64,7 +64,7 @@
 /*                             demonstration code based on hardware semaphore */
 /* This define is present in both CM7/CM4 projects                            */
 /* To comment when developping/debugging on a single core                     */
-//#define DUAL_CORE_BOOT_SYNC_SEQUENCE
+#define DUAL_CORE_BOOT_SYNC_SEQUENCE
 
 #if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
 #ifndef HSEM_ID_0
@@ -81,11 +81,12 @@
 
 /* Private variables ---------------------------------------------------------*/
 
+UART_HandleTypeDef hlpuart1;
+UART_HandleTypeDef huart3;
+
 SPI_HandleTypeDef hspi1;
 
 TIM_HandleTypeDef htim3;
-
-UART_HandleTypeDef huart3;
 
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -150,36 +151,36 @@ const osSemaphoreAttr_t loraRxSem_attributes = {
 osThreadId_t Constant_Rx_TaskHandle;
 const osThreadAttr_t Constant_Rx_Task_attributes = {
   .name = "Constant_Rx_Task",
-  .stack_size = 512 * 4,
+  .stack_size = 2048 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
 
 osThreadId_t LoRa_Tx_TaskHandle;
 const osThreadAttr_t LoRa_Tx_Task_attributes = {
   .name = "LoRa_Tx_Task",
-  .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+  .stack_size = 2048 * 4,
+  .priority = (osPriority_t) osPriorityAboveNormal,
 };
 
 osThreadId_t Node_Update_TaskHandle;
 const osThreadAttr_t Node_Update_Task_attributes = {
   .name = "Node_Update_Task",
-  .stack_size = 512 * 4,
+  .stack_size = 2048 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
 
 osThreadId_t Node_Cycle_TaskHandle;
 const osThreadAttr_t Node_Cycle_Task_attributes = {
   .name = "Node_Cycle_Task",
-  .stack_size = 512 * 4,
+  .stack_size = 1024 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
 osThreadId_t Update_Dashboard_TaskHandle;
 const osThreadAttr_t Update_Dashboard_Task_attributes = {
   .name = "Update_Dashboard_Task",
-  .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityLow,
+  .stack_size = 1024 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
 };
 
 
@@ -189,6 +190,12 @@ LoRa myLoRa;
 Hive_Master hiveMaster;
 uint16_t cycle_counter = 0;
 CentralRetxTracker central_retx = {0xFF, 0xFF, 0};
+DroneData_t detected_drone = {0.0, 0.0, 0};
+TriangulationState triang_state;
+
+volatile shared_data * const nodo1_sd = (shared_data *)0x38001000;
+volatile shared_data * const nodo2_sd = (shared_data *)0x38002000;
+volatile shared_data * const nodo3_sd = (shared_data *)0x38003000;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -196,6 +203,7 @@ static void MX_GPIO_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_LPUART1_UART_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
@@ -214,8 +222,10 @@ void Update_Dashboard_Task(void *argument);
 uint8_t validate_message(uint8_t* buffer, uint8_t rx_len);
 void print_debug_F(const char *msg);
 void print_debug(const char *msg);
-void master_print_all_nodes(Hive_Master* hive_master);
 void debug_validate(uint8_t *buffer, uint8_t rx_len);
+void send_station_status(uint8_t station_id, float_t lat, float_t lon, float_t alt,
+						 float_t battery, uint8_t status, uint16_t time_remaining, const char* name);
+void send_drone_detection(uint8_t drone_id, float_t lat, float_t lon, float_t alt, const char* name);
 /* FUNCTIONS */
 
 /* USER CODE END PFP */
@@ -270,8 +280,13 @@ int main(void)
   MX_SPI1_Init();
   MX_TIM3_Init();
   MX_USART3_UART_Init();
+  MX_LPUART1_UART_Init();
   /* USER CODE BEGIN 2 */
   print_debug_F("Init Sequence\r\n");
+  triang_state.rssi_count = 0;
+  triang_state.nodes_ready[0] = 0;
+  triang_state.nodes_ready[1] = 0;
+  triang_state.nodes_ready[2] = 0;
   HAL_TIM_Base_Stop_IT(&htim3);
   uint8_t LoRa_Status;
 	myLoRa = newLoRa(); 	//Inicializa el modulo LoRa con las configuraciones cargadas
@@ -374,6 +389,102 @@ int main(void)
 }
 
 /**
+  * @brief LPUART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_LPUART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN LPUART1_Init 0 */
+
+  /* USER CODE END LPUART1_Init 0 */
+
+  /* USER CODE BEGIN LPUART1_Init 1 */
+
+  /* USER CODE END LPUART1_Init 1 */
+  hlpuart1.Instance = LPUART1;
+  hlpuart1.Init.BaudRate = 115200;
+  hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
+  hlpuart1.Init.StopBits = UART_STOPBITS_1;
+  hlpuart1.Init.Parity = UART_PARITY_NONE;
+  hlpuart1.Init.Mode = UART_MODE_TX_RX;
+  hlpuart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  hlpuart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  hlpuart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  hlpuart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  hlpuart1.FifoMode = UART_FIFOMODE_DISABLE;
+  if (HAL_UART_Init(&hlpuart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&hlpuart1, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&hlpuart1, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&hlpuart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN LPUART1_Init 2 */
+
+  /* USER CODE END LPUART1_Init 2 */
+
+}
+
+/**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART3_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart3.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart3.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart3, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart3, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
+
+}
+
+/**
   * @brief SPI1 Initialization Function
   * @param None
   * @retval None
@@ -467,54 +578,6 @@ static void MX_TIM3_Init(void)
 }
 
 /**
-  * @brief USART3 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART3_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART3_Init 0 */
-
-  /* USER CODE END USART3_Init 0 */
-
-  /* USER CODE BEGIN USART3_Init 1 */
-
-  /* USER CODE END USART3_Init 1 */
-  huart3.Instance = USART3;
-  huart3.Init.BaudRate = 115200;
-  huart3.Init.WordLength = UART_WORDLENGTH_8B;
-  huart3.Init.StopBits = UART_STOPBITS_1;
-  huart3.Init.Parity = UART_PARITY_NONE;
-  huart3.Init.Mode = UART_MODE_TX_RX;
-  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart3.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart3.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-  huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart3, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart3, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_DisableFifoMode(&huart3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART3_Init 2 */
-
-  /* USER CODE END USART3_Init 2 */
-
-}
-
-/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -592,8 +655,9 @@ void Constant_Rx_Task(void *argument) {
 	rx_message_t aux_rx_message = {0};
 
 	for(;;) {
-		osDelay(20); //Cada 50 ms escuchamos entorno
+		osDelay(100); //Cada 100 ms escuchamos entorno
 		rx_len = 0;
+		HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 		LoRa_gotoMode(&myLoRa, RXSINGLE_MODE);
 		if(osSemaphoreAcquire(loraRxSemHandle, 500) == osOK) {
 			osMutexAcquire(loraMutexHandle, osWaitForever);
@@ -655,7 +719,7 @@ void LoRa_Tx_Task(void *argument) {
 					hiveMaster.tx_buffer[0] = baliza_id;
 					hiveMaster.tx_buffer[1] = 0xAA;
 					hiveMaster.tx_buffer[2] = hiveMaster.honeycombs[node_index].node_role;
-					LoRa_transmit(&myLoRa, hiveMaster.tx_buffer, CENTRAL_CONNECTION_PKG_SIZE, 500);
+					LoRa_transmit(&myLoRa, hiveMaster.tx_buffer, CENTRAL_CONNECTION_PKG_SIZE, 1000);
 					sprintf(debug_msg, "CONNECTION_ACK to %d role=%d (retry %d)\r\n",
 						baliza_id, hiveMaster.honeycombs[node_index].node_role, central_retx.retry_count);
 			  break;
@@ -727,93 +791,107 @@ void Node_Update_Task(void *argument) {
 	uint8_t first_error = 1; //Solo se usa para mensaje de error
 	TxCommand tx_cmd; //0 CONNECTION_PKG ACK, 1 DETECTION ACK, 2 DRONE_LOST_ACK, 3 SLEEP_CMD A AUXILIARES
 	TxCommand tx_cmd_sleep;
+	uint8_t has_detector = 0;
 	char debug_msg[50];
 
 	for(;;) {
 		//Solo actualizamos cuando llega un paquete valido a procesar
 		if (osSemaphoreAcquire(rxValidPacketSemHandle, osWaitForever) == osOK) {
-			osMessageQueueGet(rxMsgQueueHandle, &aux_rx_message, 0, 0);
+			osMessageQueueGet(rxMsgQueueHandle, &aux_rx_message, 0, 0);  // AGREGAR ESTA LÍNEA
 			osMutexAcquire(hiveMasterMutexHandle, osWaitForever);
-			if(hiveMaster.connected_honeycombs == 0) {
-				honey_comb_index = 0;
-			} else {
+
+			//Buscar nodo ANTES de validar
+			honey_comb_index = 0xFF;
+			if(hiveMaster.connected_honeycombs > 0) {
 				for(uint8_t i = 0; i < hiveMaster.connected_honeycombs; i++ ) {
 					if(aux_rx_message.node_id == hiveMaster.honeycombs[i].baliza_id) {
 						honey_comb_index = i;
 					}
 				}
 			}
+			//VALIDAR antes de procesar
+			if(honey_comb_index == 0xFF && aux_rx_message.msg_type != CONNECTION_PKG) {
+				sprintf(debug_msg, "ERROR: Node%d not in hive\r\n", aux_rx_message.node_id);
+				print_debug(debug_msg);
+				osMutexRelease(hiveMasterMutexHandle);
+			}
 
-			if(aux_rx_message.msg_type == CONNECTION_PKG) { 	//RESPONSE
-				//Verificar si el nodo ya existe
-				honey_comb_index = 0;
-				existing_node = 0;
+			if(aux_rx_message.msg_type == CONNECTION_PKG) {
+			    honey_comb_index = 0xFF;
+			    existing_node = 0;
 
-				for(uint8_t i = 0; i < hiveMaster.connected_honeycombs; i++) {
-					if(aux_rx_message.node_id == hiveMaster.honeycombs[i].baliza_id) {
-						existing_node = 1;
-						honey_comb_index = i;
-					}
-				}
+			    for(uint8_t i = 0; i < hiveMaster.connected_honeycombs; i++) {
+			        if(aux_rx_message.node_id == hiveMaster.honeycombs[i].baliza_id) {
+			            existing_node = 1;
+			            honey_comb_index = i;
+			            break;
+			        }
+			    }
 
-				//Si nodo existe pero está en error, RECONECTAR
-				if(existing_node && hiveMaster.honeycombs[honey_comb_index].status == NODE_ERROR) {
-					hiveMaster.honeycombs[honey_comb_index].devices_status.Esp32_State = 0;
-					hiveMaster.honeycombs[honey_comb_index].devices_status.LoRa_State = 0;
-					hiveMaster.honeycombs[honey_comb_index].devices_status.GPS_State = 0;
-					hiveMaster.honeycombs[honey_comb_index].devices_status.Charger_State = 0;
-					hiveMaster.honeycombs[honey_comb_index].devices_status.Microphone_State = 0;
-					hiveMaster.honeycombs[honey_comb_index].status = aux_rx_message.payload[0];
+			    if(existing_node) {
+			        hiveMaster.honeycombs[honey_comb_index].status = aux_rx_message.payload[0];
+			        hiveMaster.honeycombs[honey_comb_index].devices_status.Esp32_State = 0;
+			        hiveMaster.honeycombs[honey_comb_index].devices_status.LoRa_State = 0;
+			        hiveMaster.honeycombs[honey_comb_index].devices_status.GPS_State = 0;
+			        hiveMaster.honeycombs[honey_comb_index].devices_status.Charger_State = 0;
+			        hiveMaster.honeycombs[honey_comb_index].devices_status.Microphone_State = 0;
 
-					//Connection ack
-					tx_cmd.cmd = 0;
-					tx_cmd.node_index =  honey_comb_index;
-					osMessageQueuePut(txCmdQueueHandle, &tx_cmd, 0, 0);
+			        tx_cmd.cmd = 0;
+			        tx_cmd.node_index = honey_comb_index;
+			        osMessageQueuePut(txCmdQueueHandle, &tx_cmd, 0, 0);
 
-					sprintf(debug_msg, "UPDATE: Node%d RECONNECTED [OK]\r\n", aux_rx_message.node_id);
-					print_debug(debug_msg);
-				}
-				else if(existing_node && hiveMaster.honeycombs[honey_comb_index].status != NODE_ERROR) { 				//Si nodo existe y está bien, DESCARTAR DUPLICADO
-					sprintf(debug_msg, "UPDATE: Node%d DUPLICATE (discarded)\r\n", aux_rx_message.node_id);
-					print_debug(debug_msg);
-					//No enviar ACK, simplemente descartar
-				}
-				else if(!existing_node) { //Si NO existe, AGREGAR NUEVO
-					if(hiveMaster.connected_honeycombs < MAX_HONEYCOMBS) {
-						honey_comb_index = hiveMaster.connected_honeycombs;
-						hiveMaster.honeycombs[honey_comb_index].baliza_id = aux_rx_message.node_id;
-						hiveMaster.honeycombs[honey_comb_index].status = aux_rx_message.payload[0];
+			        //Si es aux, dormirlo
+			        if(hiveMaster.honeycombs[honey_comb_index].node_role == aux) {
+			            tx_cmd.cmd = 3;
+			            tx_cmd.node_index = honey_comb_index;
+			            osMessageQueuePut(txCmdQueueHandle, &tx_cmd, 0, 0);
+			            sprintf(debug_msg, "UPDATE: Node%d RECONNECTED as AUX -> SLEEP\r\n", aux_rx_message.node_id);
+			        } else {
+			            sprintf(debug_msg, "UPDATE: Node%d RECONNECTED as DETECTOR\r\n", aux_rx_message.node_id);
+			        }
+			        print_debug(debug_msg);
+			    }
+			    else {
+			        if(hiveMaster.connected_honeycombs < MAX_HONEYCOMBS) {
+			            honey_comb_index = hiveMaster.connected_honeycombs;
+			            hiveMaster.honeycombs[honey_comb_index].baliza_id = aux_rx_message.node_id;
+			            hiveMaster.honeycombs[honey_comb_index].status = aux_rx_message.payload[0];
 
-						// BUSCAR SI HAY DETECTOR
-						uint8_t has_detector = 0;
-						for(uint8_t i = 0; i < hiveMaster.connected_honeycombs; i++) {
-							if(hiveMaster.honeycombs[i].node_role == detector) {
-								has_detector = 1;
-								break;
-							}
-						}
+			            has_detector = 0;
+			            for(uint8_t i = 0; i < hiveMaster.connected_honeycombs; i++) {
+			                if(hiveMaster.honeycombs[i].node_role == detector) {
+			                    has_detector = 1;
+			                    break;
+			                }
+			            }
 
-						// ASIGNAR ROL
-						if(!has_detector) {
-							hiveMaster.honeycombs[honey_comb_index].node_role = detector;
-							sprintf(debug_msg, "UPDATE: Node%d ADDED as DETECTOR (total: %d)\r\n",
-								aux_rx_message.node_id, hiveMaster.connected_honeycombs + 1);
-						} else {
-							hiveMaster.honeycombs[honey_comb_index].node_role = aux;
-							sprintf(debug_msg, "UPDATE: Node%d ADDED as AUX (total: %d)\r\n",
-								aux_rx_message.node_id, hiveMaster.connected_honeycombs + 1);
-						}
+			            if(!has_detector && aux_rx_message.payload[0] != NODE_ERROR) {
+			                hiveMaster.honeycombs[honey_comb_index].node_role = detector;
+			                sprintf(debug_msg, "UPDATE: Node%d ADDED as DETECTOR (total: %d)\r\n",
+			                    aux_rx_message.node_id, hiveMaster.connected_honeycombs + 1);
+			            } else {
+			                hiveMaster.honeycombs[honey_comb_index].node_role = aux;
+			                sprintf(debug_msg, "UPDATE: Node%d ADDED as AUX (total: %d)\r\n",
+			                    aux_rx_message.node_id, hiveMaster.connected_honeycombs + 1);
+			            }
 
-						tx_cmd.cmd = 0;
-						tx_cmd.node_index = honey_comb_index;
-						osMessageQueuePut(txCmdQueueHandle, &tx_cmd, 0, 0);
+			            tx_cmd.cmd = 0;
+			            tx_cmd.node_index = honey_comb_index;
+			            osMessageQueuePut(txCmdQueueHandle, &tx_cmd, 0, 0);
 
-						print_debug(debug_msg);
-						hiveMaster.connected_honeycombs++;
-					} else {
-						print_debug("UPDATE: Hive FULL, cannot add more nodes\r\n");
-					}
-				}
+			            //Si es aux, dormirlo inmediatamente
+			            if(hiveMaster.honeycombs[honey_comb_index].node_role == aux) {
+			                tx_cmd.cmd = 3;
+			                tx_cmd.node_index = honey_comb_index;
+			                osMessageQueuePut(txCmdQueueHandle, &tx_cmd, 0, 0);
+			            }
+
+			            print_debug(debug_msg);
+			            hiveMaster.connected_honeycombs++;
+			        } else {
+			            print_debug("UPDATE: Hive FULL, cannot add more nodes\r\n");
+			        }
+			    }
 			} else if (aux_rx_message.msg_type == ERROR_PKG) {
 				hiveMaster.honeycombs[honey_comb_index].status = aux_rx_message.payload[0];
 				hiveMaster.honeycombs[honey_comb_index].devices_status.Esp32_State = aux_rx_message.payload[1];
@@ -874,7 +952,7 @@ void Node_Update_Task(void *argument) {
 					print_debug("No errors");
 				}
 
-			print_debug("]\r\n"); //Cierre de update y mensaje
+				print_debug("]\r\n"); //Cierre de update y mensaje
 			} else if (aux_rx_message.msg_type == ENERGY_PKG) {
 				hiveMaster.honeycombs[honey_comb_index].status = aux_rx_message.payload[0];
 				hiveMaster.honeycombs[honey_comb_index].honey_data.transmission_type = aux_rx_message.payload[1];
@@ -898,6 +976,18 @@ void Node_Update_Task(void *argument) {
 				memcpy(&hiveMaster.honeycombs[honey_comb_index].honey_data.location_data.latitude, &aux_rx_message.payload[2], 4);
 				memcpy(&hiveMaster.honeycombs[honey_comb_index].honey_data.location_data.longitude, &aux_rx_message.payload[6], 4);
 
+				//Guardar en shared_data para trilateración
+				if(honey_comb_index == 0) {
+					nodo1_sd->lat_bal = hiveMaster.honeycombs[honey_comb_index].honey_data.location_data.latitude;
+					nodo1_sd->lon_bal = hiveMaster.honeycombs[honey_comb_index].honey_data.location_data.longitude;
+				} else if(honey_comb_index == 1) {
+					nodo2_sd->lat_bal = hiveMaster.honeycombs[honey_comb_index].honey_data.location_data.latitude;
+					nodo2_sd->lon_bal = hiveMaster.honeycombs[honey_comb_index].honey_data.location_data.longitude;
+				} else if(honey_comb_index == 2) {
+					nodo3_sd->lat_bal = hiveMaster.honeycombs[honey_comb_index].honey_data.location_data.latitude;
+					nodo3_sd->lon_bal = hiveMaster.honeycombs[honey_comb_index].honey_data.location_data.longitude;
+				}
+
 				sprintf(debug_msg, "UPDATE: Node%d GPS [LAT=%.4f LON=%.4f]\r\n",
 				aux_rx_message.node_id,
 				hiveMaster.honeycombs[honey_comb_index].honey_data.location_data.latitude,
@@ -907,15 +997,26 @@ void Node_Update_Task(void *argument) {
 			    osMessageQueuePut(txCmdQueueHandle, &tx_cmd, 0, 0);
 				print_debug(debug_msg);
 			} else if (aux_rx_message.msg_type == DETECTION_PKG) { 		//RESPONSE
-				hiveMaster.honeycombs[honey_comb_index].status = aux_rx_message.payload[0];
-				hiveMaster.honeycombs[honey_comb_index].honey_data.transmission_type = aux_rx_message.payload[1];
+			    hiveMaster.honeycombs[honey_comb_index].status = aux_rx_message.payload[0];
 
-				//Drone detected ack
-				tx_cmd.cmd = 1;
-				tx_cmd.node_index = honey_comb_index;
-				osMessageQueuePut(txCmdQueueHandle, &tx_cmd, 0, 0);
+			    detected_drone.valid = 0;
+			    detected_drone.latitude = 0.0;
+			    detected_drone.longitude = 0.0;
 
-				print_debug("UPDATE: DRONE DETECTED [ACK QUEUED]\r\n");
+			    tx_cmd.cmd = 1;
+			    tx_cmd.node_index = honey_comb_index;
+			    osMessageQueuePut(txCmdQueueHandle, &tx_cmd, 0, 0);
+
+			    //DESPERTAR AUXILIARES DORMIDOS PARA TRIANGULACIÓN
+			    for (uint8_t i = 0; i < hiveMaster.connected_honeycombs; i++) {
+			        if (i != honey_comb_index && hiveMaster.honeycombs[i].status == SLEEPING) {
+			            tx_cmd.cmd = 4; // WKP_CMD
+			            tx_cmd.node_index = i;
+			            osMessageQueuePut(txCmdQueueHandle, &tx_cmd, 0, 0);
+			        }
+			    }
+
+			    print_debug("UPDATE: DRONE DETECTED, waking auxiliaries\r\n");
 			} else if (aux_rx_message.msg_type == SLEEPING_PKG) {
 				//CONFIRMAMOS SLEEP
 				hiveMaster.honeycombs[honey_comb_index].status = SLEEPING;
@@ -929,6 +1030,12 @@ void Node_Update_Task(void *argument) {
 				tx_cmd.node_index = honey_comb_index;
 				osMessageQueuePut(txCmdQueueHandle, &tx_cmd, 0, 0);
 
+				//Limpiar trilateración cuando se pierde dron
+				triang_state.rssi_count = 0;
+				triang_state.nodes_ready[0] = 0;
+				triang_state.nodes_ready[1] = 0;
+				triang_state.nodes_ready[2] = 0;
+
 				for (uint8_t i = 0; i < hiveMaster.connected_honeycombs; i++ ) {
 				    if(i != honey_comb_index) {
 				        tx_cmd_sleep.cmd = 3;
@@ -938,12 +1045,31 @@ void Node_Update_Task(void *argument) {
 				}
 				print_debug("UPDATE: DRONE LOST [SLEEP QUEUED TO AUXILIARIES]\r\n");
 
+
 			} else if (aux_rx_message.msg_type == TRIANG_PKG) {
-				//AVISAR A SEMAFORO HSEM PARA QUE TRIANGULES
+				//AVISAR A SEMAFORO HSEM PARA QUE TRIANGULES SI CUMPLE LAS CONDICIONES
+				for(uint8_t i = 0; i < RSSI_BUFFER_SIZE; i++) { //Guardar RSSI en shared_data del nodo
+					if(honey_comb_index == 0) {
+						nodo1_sd->intensidades[i] = aux_rx_message.payload[i];
+					} else if(honey_comb_index == 1) {
+						nodo2_sd->intensidades[i] = aux_rx_message.payload[i];
+					} else if(honey_comb_index == 2) {
+						nodo3_sd->intensidades[i] = aux_rx_message.payload[i];
+					}
+				}
+
+				//Marcar como recibido
+				if(!triang_state.nodes_ready[honey_comb_index]) {
+					triang_state.nodes_ready[honey_comb_index] = 1;
+					triang_state.rssi_count++;
+				}
+				//Si tenemos los 3 RSSI, notificar CM7
+				if(triang_state.rssi_count == MAX_HONEYCOMBS) {
+					print_debug("TRIANG: All 3 nodes ready, CM7 notified\r\n");
+					HAL_HSEM_ActivateNotification(__HAL_HSEM_SEMID_TO_MASK(HSEM_ID_0));
+				}
 				print_debug("UPDATE: TRIANG PKG RECEIVED [HSEM SIGNAL PENDING]\r\n");
 			}
-
-			//master_print_all_nodes(&hiveMaster);
 			osMutexRelease(hiveMasterMutexHandle);
 		}
 		osDelay(50);
@@ -964,53 +1090,74 @@ void Node_Cycle_Task(void *argument) {
             //Verificar triangulación en progreso
             in_triangulation = 0;
             for(uint8_t i = 0; i < hiveMaster.connected_honeycombs; i++) {
-                if(hiveMaster.honeycombs[i].status == TRIANGULATION) {
+                if(hiveMaster.honeycombs[i].status == TRIANGULATION ||
+                   hiveMaster.honeycombs[i].status == DETECTION) {
                     in_triangulation = 1;
+                    break;
                 }
             }
 
-            //Solo rotar si NO hay triangulación
+            //NO ROTAR durante detección/triangulación
             if(!in_triangulation && hiveMaster.connected_honeycombs > 1) {
 
                 for(uint8_t i = 0; i < hiveMaster.connected_honeycombs; i++) {
                     if(hiveMaster.honeycombs[i].node_role == detector) {
                         currentDetectorIndex = i;
+                        break;
                     }
                 }
 
                 if(currentDetectorIndex != 0xFF) {
-                	//Sleep cmd
-                	tx_cmd.cmd = 3;
-                	tx_cmd.node_index = currentDetectorIndex;
-                	osMessageQueuePut(txCmdQueueHandle, &tx_cmd, 0, 0);
+                    //Dormir detector actual
+                    tx_cmd.cmd = 3;
+                    tx_cmd.node_index = currentDetectorIndex;
+                    osMessageQueuePut(txCmdQueueHandle, &tx_cmd, 0, 0);
                     hiveMaster.honeycombs[currentDetectorIndex].node_role = aux;
+                    hiveMaster.honeycombs[currentDetectorIndex].status = SLEEPING; // Actualizar estado
                     sprintf(debug_msg, "CYCLE: Node%d SLEEP\r\n",
-                    hiveMaster.honeycombs[currentDetectorIndex].baliza_id);
+                        hiveMaster.honeycombs[currentDetectorIndex].baliza_id);
+                    print_debug(debug_msg);
                 }
 
+                //Despertar siguiente detector
                 nextDetectorIndex = (currentDetectorIndex + 1) % hiveMaster.connected_honeycombs;
-            	tx_cmd.cmd = 4;
-            	tx_cmd.node_index = nextDetectorIndex;
-            	osMessageQueuePut(txCmdQueueHandle, &tx_cmd, 0, 0);
+                tx_cmd.cmd = 4;
+                tx_cmd.node_index = nextDetectorIndex;
+                osMessageQueuePut(txCmdQueueHandle, &tx_cmd, 0, 0);
                 hiveMaster.honeycombs[nextDetectorIndex].node_role = detector;
                 sprintf(debug_msg, "CYCLE: Node%d WAKE\r\n",
-                hiveMaster.honeycombs[nextDetectorIndex].baliza_id);
-
-                osMutexRelease(hiveMasterMutexHandle);
+                    hiveMaster.honeycombs[nextDetectorIndex].baliza_id);
                 print_debug(debug_msg);
-            } else {
-                osMutexRelease(hiveMasterMutexHandle);
+            } else if(in_triangulation) {
+                print_debug("CYCLE: Skipped - triangulation active\r\n");
             }
+
+            osMutexRelease(hiveMasterMutexHandle);
         }
     }
 }
 
 void Update_Dashboard_Task(void *argument) {
 
-	for(;;){
-		if (osSemaphoreAcquire(dashboardSemHandle, osWaitForever) ) {
-			print_debug("UPDATE: update dashboard\r\n");
-		}
+	for(;;) {
+        if (osSemaphoreAcquire(dashboardSemHandle, osWaitForever) == osOK) {
+            osMutexAcquire(hiveMasterMutexHandle, osWaitForever);
+           // print_debug("Actualizando dash...\r\n");
+            //Enviar estado de cada nodo conectado
+            for(uint8_t i = 0; i < hiveMaster.connected_honeycombs; i++) {
+                send_station_status(
+                    hiveMaster.honeycombs[i].baliza_id,
+                    hiveMaster.honeycombs[i].honey_data.location_data.latitude,
+                    hiveMaster.honeycombs[i].honey_data.location_data.longitude,
+                    0.0,														//alt hardcodeada
+                    hiveMaster.honeycombs[i].honey_data.energy_data.Percentage,
+                    hiveMaster.honeycombs[i].status,
+                    0,															//Time remaining hardcodeada
+                    "Nodo"														//Nombre hardcodeado
+                );
+            }
+            osMutexRelease(hiveMasterMutexHandle);
+        }
 	}
 }
 
@@ -1060,51 +1207,13 @@ void print_debug_F(const char *msg) { //Funcion de debuggeo, posterior eliminaci
     HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), 100);
 }
 
+
 void print_debug(const char *msg) { //Funcion de debuggeo, posterior eliminación
 	osMutexAcquire(printUartMutexHandle, osWaitForever);
     HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), 100);
     osMutexRelease(printUartMutexHandle);
 }
 
-void master_print_all_nodes(Hive_Master* hive_master) {
-    char msg[200];
-    HoneyComb_s* nodo;
-
-    sprintf(msg, "\n=== HIVE STATUS: %d nodes ===\r\n", hive_master->connected_honeycombs);
-    print_debug(msg);
-
-    for(uint8_t i = 0; i < hive_master->connected_honeycombs; i++) {
-        nodo = &hive_master->honeycombs[i];
-
-        //Info nodo
-        sprintf(msg, "\n[node %d] ID=%c Status=%d\r\n",
-                i, nodo->baliza_id, nodo->status);
-        print_debug(msg);
-
-        //Devices status
-        sprintf(msg, "Devices: ESP32=%d LoRa=%d GPS=%d Charger=%d Mic=%d\r\n",
-                nodo->devices_status.Esp32_State,
-                nodo->devices_status.LoRa_State,
-                nodo->devices_status.GPS_State,
-                nodo->devices_status.Charger_State,
-                nodo->devices_status.Microphone_State);
-        print_debug(msg);
-
-        //Energia
-        sprintf(msg,"Voltage=%.2f%% Percentage=%.2f%% Discharge=%.2f\r\n",
-        		nodo->honey_data.energy_data.Voltage,
-                nodo->honey_data.energy_data.Percentage,
-                nodo->honey_data.energy_data.DischargeRate);
-        print_debug(msg);
-
-        //Ubicacion
-        sprintf(msg,"Latitude=%.2f%% Longitude=%.2f\r\n",
-                nodo->honey_data.location_data.latitude,
-                nodo->honey_data.location_data.longitude);
-        print_debug(msg);
-    }
-    print_debug("=== END HIVE ===\r\n\n");
-}
 
 void debug_validate(uint8_t *buffer, uint8_t rx_len) {
 	osMutexAcquire(printUartMutexHandle, osWaitForever);
@@ -1121,9 +1230,27 @@ void debug_validate(uint8_t *buffer, uint8_t rx_len) {
 	osMutexRelease(printUartMutexHandle);
 }
 
+
+void send_drone_detection(uint8_t drone_id, float_t lat, float_t lon, float_t alt, const char* name) {
+	char msg[100];
+	sprintf(msg, "%drn-d,%.4f,%.4f,%.2f,%s\r\n", drone_id, lat, lon, alt, name);
+	HAL_UART_Transmit(&hlpuart1, (uint8_t*)msg, strlen(msg), 100);
+}
+
+
+void send_station_status(uint8_t station_id, float_t lat, float_t lon, float_t alt,
+						 float_t battery, uint8_t status, uint16_t time_remaining, const char* name) {
+	char msg[120];
+	sprintf(msg, "st-%d,%.4f,%.4f,%.2f,%.1f,%d,%d,%s\r\n",
+			station_id, lat, lon, alt, battery, status, time_remaining, name);
+	HAL_UART_Transmit(&hlpuart1, (uint8_t*)msg, strlen(msg), 100);
+}
+
+
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 	if (GPIO_Pin == LoRa_IRQ_Pin) {
 		osSemaphoreRelease(loraRxSemHandle);
+		HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);
 		print_debug_F("LORA_RX callback\r\n");
 	}
 }

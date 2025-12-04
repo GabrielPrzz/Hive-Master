@@ -57,6 +57,8 @@ void SPI1_IRQHandler(void);
 void USART3_IRQHandler(void);
 void EXTI15_10_IRQHandler(void);
 void TIM15_IRQHandler(void);
+void HSEM2_IRQHandler(void);
+void LPUART1_IRQHandler(void);
 /* USER CODE BEGIN EFP */
 
 /* USER CODE END EFP */

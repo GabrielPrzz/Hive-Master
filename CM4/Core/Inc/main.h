@@ -124,6 +124,12 @@ typedef enum {							//Señales que avisan que tipo de dato mandamos
 	aux,
 } system_role;
 
+typedef struct{
+	uint8_t intensidades[13];
+	float_t lat_bal;
+	float_t lon_bal;
+} shared_data;
+
 typedef struct {
     int8_t rssi[RSSI_BUFFER_SIZE]; 		//Este rssi sirve para detectar dron
 } scan_t;
@@ -144,7 +150,6 @@ typedef struct {
     energy_t energy_data;
     gps_t location_data;
 } lora_package;
-
 
 typedef struct { 						//States para verificación en las Bálizas
 	uint8_t LoRa_State;					//1 para errores, 0 para OK
@@ -189,6 +194,17 @@ typedef struct {
     uint8_t cmd;
     uint8_t node_index;
 } TxCommand;
+
+typedef struct {
+	float_t latitude;
+	float_t longitude;
+	uint8_t valid;
+} DroneData_t;
+
+typedef struct {
+	uint8_t rssi_count;        //Contador de nodos con TRIANG_PKG
+	uint8_t nodes_ready[MAX_HONEYCOMBS];  //Marca qué nodos reportaron
+} TriangulationState;
 
 /* USER CODE END Private defines */
 

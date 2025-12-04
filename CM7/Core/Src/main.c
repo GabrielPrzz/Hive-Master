@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "trilateration.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,7 +36,7 @@
 /*                             demonstration code based on hardware semaphore */
 /* This define is present in both CM7/CM4 projects                            */
 /* To comment when developping/debugging on a single core                     */
-//#define DUAL_CORE_BOOT_SYNC_SEQUENCE
+#define DUAL_CORE_BOOT_SYNC_SEQUENCE
 
 #if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
 #ifndef HSEM_ID_0
@@ -53,6 +53,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 
+UART_HandleTypeDef hlpuart1;
 UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
@@ -62,12 +63,24 @@ UART_HandleTypeDef huart3;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-
+void send_drone_detection(uint8_t drone_id, float_t lat, float_t lon, float_t alt, const char* name);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+typedef struct{
+	uint8_t intensidades[13];
+	float_t lat_bal;
+	float_t lon_bal;
+} shared_data;
 
+volatile shared_data * const nodo1_sd = (shared_data *)0x38001000;
+volatile shared_data * const nodo2_sd = (shared_data *)0x38002000;
+volatile shared_data * const nodo3_sd = (shared_data *)0x38003000;
+
+uint32_t max_intensidad_1 = 0;
+uint32_t max_intensidad_2 = 0;
+uint32_t max_intensidad_3 = 0;
 /* USER CODE END 0 */
 
 /**
@@ -141,6 +154,60 @@ Error_Handler();
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  nodo1_sd->lon_bal = 0;
+	 	  nodo2_sd->lon_bal = 0;
+	 	  nodo3_sd->lon_bal = 0;
+
+	 	  nodo1_sd->lat_bal = 0;
+	 	  nodo2_sd->lat_bal = 0;
+	 	  nodo3_sd->lat_bal = 0;
+
+	 	  memset((void*)nodo1_sd->intensidades, 0, sizeof(nodo1_sd->intensidades));
+	 	  memset((void*)nodo2_sd->intensidades, 0, sizeof(nodo2_sd->intensidades));
+	 	  memset((void*)nodo3_sd->intensidades, 0, sizeof(nodo3_sd->intensidades));
+
+	 	  HAL_HSEM_FastTake(HSEM_ID_0);
+	 	  if(nodo1_sd->lon_bal == 0){
+	 		  HAL_HSEM_Release(HSEM_ID_0,0);
+	 	  } else {
+	 		  arm_max_f32((float32_t *)nodo1_sd->intensidades, 13, NULL, &max_intensidad_1);
+	 		  arm_max_f32((float32_t *)nodo2_sd->intensidades, 13, NULL, &max_intensidad_2);
+	 		  arm_max_f32((float32_t *)nodo3_sd->intensidades, 13, NULL, &max_intensidad_3);
+
+	 		  ReceiverData_t recievers[3] = {
+	 				  {{nodo1_sd->lat_bal, nodo1_sd->lon_bal}, max_intensidad_1, 0.0f},  // Board 1: lat, lon, RSSI, distance
+	 				  {{nodo2_sd->lat_bal, nodo2_sd->lon_bal}, max_intensidad_2, 0.0f},  // Board 2
+	 				  {{nodo3_sd->lat_bal, nodo3_sd->lon_bal}, max_intensidad_3, 0.0f}   // Board 3
+	 		  };
+
+	 		  DronePosition_t drone_pos;
+
+	 		  int8_t status = process_drone_location(recievers, 3, &drone_pos);
+
+	 		  if (status == 0 && drone_pos.valid)
+	 		      {
+	 		          // Successfully calculated position
+	 		          // drone_pos.position.lat and drone_pos.position.lon contain the result
+	 		          // You can transmit this via UART, USB, or display on screen
+						send_drone_detection(
+							1,                      //drone_id hardcodeado
+							drone_pos.position.lat,
+							drone_pos.position.lon,
+							0.0,
+							"DJI_Phantom"           //name hardcodeado
+						);
+	 		          // Example: Print via UART (pseudo-code)
+	 		          // printf("Drone Position: %.6f, %.6f\r\n",
+	 		          //        drone_pos.position.lat,
+	 		          //        drone_pos.position.lon);
+	 		          // printf("Error metric: %.2f\r\n", drone_pos.error);
+
+	 			  	  HAL_HSEM_Release(HSEM_ID_0,0);
+	 		      } else  {
+
+	 		    	  HAL_HSEM_Release(HSEM_ID_0,0);
+	 		      }
+	 	  }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -196,7 +263,7 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
-  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV1;
+  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV2;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV1;
   RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV1;
@@ -205,6 +272,54 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief LPUART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+void MX_LPUART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN LPUART1_Init 0 */
+
+  /* USER CODE END LPUART1_Init 0 */
+
+  /* USER CODE BEGIN LPUART1_Init 1 */
+
+  /* USER CODE END LPUART1_Init 1 */
+  hlpuart1.Instance = LPUART1;
+  hlpuart1.Init.BaudRate = 115200;
+  hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
+  hlpuart1.Init.StopBits = UART_STOPBITS_1;
+  hlpuart1.Init.Parity = UART_PARITY_NONE;
+  hlpuart1.Init.Mode = UART_MODE_TX_RX;
+  hlpuart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  hlpuart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  hlpuart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  hlpuart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  hlpuart1.FifoMode = UART_FIFOMODE_DISABLE;
+  if (HAL_UART_Init(&hlpuart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&hlpuart1, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&hlpuart1, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&hlpuart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN LPUART1_Init 2 */
+
+  /* USER CODE END LPUART1_Init 2 */
+
 }
 
 /**
@@ -256,7 +371,11 @@ void MX_USART3_UART_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-
+void send_drone_detection(uint8_t drone_id, float_t lat, float_t lon, float_t alt, const char* name) {
+	char msg[100];
+	sprintf(msg, "%d,%.4f,%.4f,%.2f,%s\r\n", drone_id, lat, lon, alt, name);
+	HAL_UART_Transmit(&hlpuart1, (uint8_t*)msg, strlen(msg), 100);
+}
 /* USER CODE END 4 */
 
 /**
