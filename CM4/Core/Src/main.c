@@ -23,7 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdlib.h>
-#include "LoRa.h"
+#include "HC12.h"
 #include <stdio.h>
 #include <string.h>
 /* USER CODE END Includes */
@@ -39,7 +39,7 @@
 #define VALID_NODE_IDS {65, 66, 67}
 
 //CENTRAL PKG SIZES
-//Respones
+//Responses
 #define CENTRAL_CONNECTION_PKG_SIZE 3
 #define DETECTION_ACK_PKG_SIZE 	2
 #define DRONE_LOST_ACK_PKG_SIZE 2
@@ -47,15 +47,6 @@
 #define SLEEP_CMD_PKG_SIZE 2
 #define TRIANGULACTION_CMD_PKG_SIZE 2
 #define WKP_CMD_PKG_SIZE 2
-
-//HIVEMASTER_COMMANDS
-#define SLEEP_CMD 0xA0
-#define DETECTION_ACK_CMD 0xB0
-#define DRONE_LOST_ACK_CMD 0xC0
-#define ENERGY_ACK_CMD 0xC1
-#define GPS_ACK_CMD 0xC2
-#define DRONE_LOST_AUX_CMD 0xD0
-#define WKP_CMD 0xE0
 
 //Retries
 #define MAX_RETRIES 3
@@ -82,9 +73,9 @@
 /* Private variables ---------------------------------------------------------*/
 
 UART_HandleTypeDef hlpuart1;
+UART_HandleTypeDef huart4;
 UART_HandleTypeDef huart3;
-
-SPI_HandleTypeDef hspi1;
+DMA_HandleTypeDef hdma_uart4_rx;
 
 TIM_HandleTypeDef htim3;
 
@@ -110,10 +101,10 @@ osMutexId_t hiveMasterMutexHandle;
 const osMutexAttr_t hiveMasterMutex_attributes = {
   .name = "hiveMasterMutex"
 };
-/* Definitions for loraMutex */
-osMutexId_t loraMutexHandle;
-const osMutexAttr_t loraMutex_attributes = {
-  .name = "loraMutex"
+/* Definitions for hc12Mutex */
+osMutexId_t hc12MutexHandle;
+const osMutexAttr_t hc12Mutex_attributes = {
+  .name = "hc12Mutex"
 };
 /* Definitions for printUartMutex */
 osMutexId_t printUartMutexHandle;
@@ -140,10 +131,10 @@ osSemaphoreId_t cycleAlarmSemHandle;
 const osSemaphoreAttr_t cycleAlarmSem_attributes = {
   .name = "cycleAlarmSem"
 };
-/* Definitions for loraRxSem */
-osSemaphoreId_t loraRxSemHandle;
-const osSemaphoreAttr_t loraRxSem_attributes = {
-  .name = "loraRxSem"
+/* Definitions for hc12RxSem */
+osSemaphoreId_t hc12RxSemHandle;
+const osSemaphoreAttr_t hc12RxSem_attributes = {
+  .name = "hc12RxSem"
 };
 /* USER CODE BEGIN PV */
 /* RTOS */
@@ -155,9 +146,9 @@ const osThreadAttr_t Constant_Rx_Task_attributes = {
   .priority = (osPriority_t) osPriorityHigh,
 };
 
-osThreadId_t LoRa_Tx_TaskHandle;
-const osThreadAttr_t LoRa_Tx_Task_attributes = {
-  .name = "LoRa_Tx_Task",
+osThreadId_t HC12_Tx_TaskHandle;
+const osThreadAttr_t HC12_Tx_Task_attributes = {
+  .name = "HC12_Tx_Task",
   .stack_size = 2048 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
@@ -186,12 +177,14 @@ const osThreadAttr_t Update_Dashboard_Task_attributes = {
 
 /*PRIVATE VARIABLES*/
 
-LoRa myLoRa;
 Hive_Master hiveMaster;
 uint16_t cycle_counter = 0;
 CentralRetxTracker central_retx = {0xFF, 0xFF, 0};
 DroneData_t detected_drone = {0.0, 0.0, 0};
 TriangulationState triang_state;
+
+uint8_t hc12_rx_buffer[HC12_MAX_SIZE];
+uint16_t hc12_rx_len = 0;
 
 volatile shared_data * const nodo1_sd = (shared_data *)0x38001000;
 volatile shared_data * const nodo2_sd = (shared_data *)0x38002000;
@@ -200,17 +193,18 @@ volatile shared_data * const nodo3_sd = (shared_data *)0x38003000;
 
 /* Private function prototypes -----------------------------------------------*/
 static void MX_GPIO_Init(void);
-static void MX_SPI1_Init(void);
+static void MX_DMA_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_LPUART1_UART_Init(void);
+static void MX_UART4_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
 
 /* RTOS */
 void Constant_Rx_Task(void *argument);
-void LoRa_Tx_Task(void *argument);
+void HC12_Tx_Task(void *argument);
 void Node_Update_Task(void *argument);
 void Node_Cycle_Task(void *argument);
 void Update_Dashboard_Task(void *argument);
@@ -277,10 +271,11 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_SPI1_Init();
+  MX_DMA_Init();
   MX_TIM3_Init();
   MX_USART3_UART_Init();
   MX_LPUART1_UART_Init();
+  MX_UART4_Init();
   /* USER CODE BEGIN 2 */
   print_debug_F("Init Sequence\r\n");
   triang_state.rssi_count = 0;
@@ -288,20 +283,8 @@ int main(void)
   triang_state.nodes_ready[1] = 0;
   triang_state.nodes_ready[2] = 0;
   HAL_TIM_Base_Stop_IT(&htim3);
-  uint8_t LoRa_Status;
-	myLoRa = newLoRa(); 	//Inicializa el modulo LoRa con las configuraciones cargadas
-	LoRa_Status = LoRa_connection(&myLoRa, &hspi1);
-	while (LoRa_Status) {
-		//Funcion que prende buzzer
-		print_debug_F("CRITICAL ERROR: LoRa Failed\r\n");
-		HAL_Delay(500);
-		//Reintentamos...
-		LoRa_Status = LoRa_connection(&myLoRa, &hspi1);
-	}
-	print_debug_F("Init SUCCESFUL\r\n");
-	HAL_TIM_Base_Start_IT(&htim3);
-
-	//Si no esta bien el LoRa, no tiene caso que inicie nada...
+  HC12_StartRxIdle(&huart4, hc12_rx_buffer, HC12_MAX_SIZE);
+  print_debug_F("HC12 Init SUCCESFUL\r\n");
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -310,8 +293,8 @@ int main(void)
   /* creation of hiveMasterMutex */
   hiveMasterMutexHandle = osMutexNew(&hiveMasterMutex_attributes);
 
-  /* creation of loraMutex */
-  loraMutexHandle = osMutexNew(&loraMutex_attributes);
+  /* creation of hc12Mutex */
+  hc12MutexHandle = osMutexNew(&hc12Mutex_attributes);
 
   /* creation of printUartMutex */
   printUartMutexHandle = osMutexNew(&printUartMutex_attributes);
@@ -333,8 +316,8 @@ int main(void)
   /* creation of cycleAlarmSem */
   cycleAlarmSemHandle = osSemaphoreNew(1, 0, &cycleAlarmSem_attributes);
 
-  /* creation of loraRxSem */
-  loraRxSemHandle = osSemaphoreNew(1, 0, &loraRxSem_attributes);
+  /* creation of hc12RxSem */
+  hc12RxSemHandle = osSemaphoreNew(1, 0, &hc12RxSem_attributes);
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   /* add semaphores, ... */
@@ -362,7 +345,7 @@ int main(void)
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
   Constant_Rx_TaskHandle = osThreadNew(Constant_Rx_Task, NULL, &Constant_Rx_Task_attributes);
-  LoRa_Tx_TaskHandle = osThreadNew(LoRa_Tx_Task, NULL, &LoRa_Tx_Task_attributes);
+  HC12_Tx_TaskHandle = osThreadNew(HC12_Tx_Task, NULL, &HC12_Tx_Task_attributes);
   Node_Update_TaskHandle = osThreadNew(Node_Update_Task, NULL, &Node_Update_Task_attributes);
   Node_Cycle_TaskHandle = osThreadNew(Node_Cycle_Task, NULL, &Node_Cycle_Task_attributes);
   Update_Dashboard_TaskHandle = osThreadNew(Update_Dashboard_Task, NULL, &Update_Dashboard_Task_attributes);
@@ -437,6 +420,51 @@ static void MX_LPUART1_UART_Init(void)
 }
 
 /**
+  * @brief UART4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_UART4_Init(void)
+{
+
+  /* USER CODE BEGIN UART4_Init 0 */
+
+  /* USER CODE END UART4_Init 0 */
+  /* USER CODE BEGIN UART4_Init 1 */
+  /* USER CODE END UART4_Init 1 */
+  huart4.Instance = UART4;
+  huart4.Init.BaudRate = 9600;
+  huart4.Init.WordLength = UART_WORDLENGTH_8B;
+  huart4.Init.StopBits = UART_STOPBITS_1;
+  huart4.Init.Parity = UART_PARITY_NONE;
+  huart4.Init.Mode = UART_MODE_TX_RX;
+  huart4.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart4.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart4.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart4.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart4.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart4, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart4, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN UART4_Init 2 */
+  /* USER CODE END UART4_Init 2 */
+
+}
+
+/**
   * @brief USART3 Initialization Function
   * @param None
   * @retval None
@@ -481,54 +509,6 @@ static void MX_USART3_UART_Init(void)
   /* USER CODE BEGIN USART3_Init 2 */
 
   /* USER CODE END USART3_Init 2 */
-
-}
-
-/**
-  * @brief SPI1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_SPI1_Init(void)
-{
-
-  /* USER CODE BEGIN SPI1_Init 0 */
-
-  /* USER CODE END SPI1_Init 0 */
-
-  /* USER CODE BEGIN SPI1_Init 1 */
-
-  /* USER CODE END SPI1_Init 1 */
-  /* SPI1 parameter configuration*/
-  hspi1.Instance = SPI1;
-  hspi1.Init.Mode = SPI_MODE_MASTER;
-  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
-  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
-  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
-  hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_64;
-  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
-  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
-  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
-  hspi1.Init.CRCPolynomial = 0x0;
-  hspi1.Init.NSSPMode = SPI_NSS_PULSE_DISABLE;
-  hspi1.Init.NSSPolarity = SPI_NSS_POLARITY_LOW;
-  hspi1.Init.FifoThreshold = SPI_FIFO_THRESHOLD_01DATA;
-  hspi1.Init.TxCRCInitializationPattern = SPI_CRC_INITIALIZATION_ALL_ZERO_PATTERN;
-  hspi1.Init.RxCRCInitializationPattern = SPI_CRC_INITIALIZATION_ALL_ZERO_PATTERN;
-  hspi1.Init.MasterSSIdleness = SPI_MASTER_SS_IDLENESS_00CYCLE;
-  hspi1.Init.MasterInterDataIdleness = SPI_MASTER_INTERDATA_IDLENESS_00CYCLE;
-  hspi1.Init.MasterReceiverAutoSusp = SPI_MASTER_RX_AUTOSUSP_DISABLE;
-  hspi1.Init.MasterKeepIOState = SPI_MASTER_KEEP_IO_STATE_DISABLE;
-  hspi1.Init.IOSwap = SPI_IO_SWAP_DISABLE;
-  if (HAL_SPI_Init(&hspi1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN SPI1_Init 2 */
-
-  /* USER CODE END SPI1_Init 2 */
 
 }
 
@@ -578,6 +558,22 @@ static void MX_TIM3_Init(void)
 }
 
 /**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Stream0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -592,18 +588,11 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
-  __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
-  __HAL_RCC_GPIOG_CLK_ENABLE();
+  __HAL_RCC_GPIOE_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, LED_VERDE_Pin|LED_ROJO_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(SPI1_RST_GPIO_Port, SPI1_RST_Pin, GPIO_PIN_SET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(SPI1_SS_LoRa_GPIO_Port, SPI1_SS_LoRa_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LED_AMARILLO_GPIO_Port, LED_AMARILLO_Pin, GPIO_PIN_RESET);
@@ -615,29 +604,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : SPI1_RST_Pin LED_AMARILLO_Pin */
-  GPIO_InitStruct.Pin = SPI1_RST_Pin|LED_AMARILLO_Pin;
+  /*Configure GPIO pin : LED_AMARILLO_Pin */
+  GPIO_InitStruct.Pin = LED_AMARILLO_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : SPI1_SS_LoRa_Pin */
-  GPIO_InitStruct.Pin = SPI1_SS_LoRa_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  HAL_GPIO_Init(SPI1_SS_LoRa_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : LoRa_IRQ_Pin */
-  GPIO_InitStruct.Pin = LoRa_IRQ_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(LoRa_IRQ_GPIO_Port, &GPIO_InitStruct);
-
-  /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+  HAL_GPIO_Init(LED_AMARILLO_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -649,139 +621,131 @@ static void MX_GPIO_Init(void)
 /* RTOS TASKS */
 
 void Constant_Rx_Task(void *argument) {
+  msg_type type;
+  uint8_t rx_len;
+  rx_message_t aux_rx_message = {0};
 
-	msg_type type; //Mandamos numero para el switch case que hace update
-	uint8_t rx_len;
-	rx_message_t aux_rx_message = {0};
+  for(;;) {
 
-	for(;;) {
-		osDelay(100); //Cada 100 ms escuchamos entorno
-		rx_len = 0;
-		HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
-		LoRa_gotoMode(&myLoRa, RXSINGLE_MODE);
-		if(osSemaphoreAcquire(loraRxSemHandle, 500) == osOK) {
-			osMutexAcquire(loraMutexHandle, osWaitForever);
-			rx_len = LoRa_receive_no_mode_change(&myLoRa, hiveMaster.rx_buffer, LORA_ENERGY_PKG_SIZE); //Se pone el size del pkg mas grande
-			LoRa_gotoMode(&myLoRa, SLEEP_MODE);
-			osMutexRelease(loraMutexHandle);
+    //Esperar a que HAL_UARTEx_ReceiveToIdle_DMA detecte fin de transmisión
+    if(osSemaphoreAcquire(hc12RxSemHandle, 100) == osOK) {
+      osMutexAcquire(hc12MutexHandle, osWaitForever);
+      rx_len = hc12_rx_len;
 
-			if(rx_len > 0) {
-				debug_validate(hiveMaster.rx_buffer, rx_len);
-				type = validate_message(hiveMaster.rx_buffer, rx_len);
-				if(type != INVALID_PKG) {
-					aux_rx_message.node_id = hiveMaster.rx_buffer[0];
-					aux_rx_message.msg_type = type;
-					memcpy(aux_rx_message.payload, &hiveMaster.rx_buffer[1], rx_len - 1); //Copia de status en adelante
-					aux_rx_message.payload_len = rx_len - 1;
-					osSemaphoreRelease(rxValidPacketSemHandle);
-					osMessageQueuePut(rxMsgQueueHandle, &aux_rx_message, 0, 0);
-				} else {
-					print_debug("Paquete invalido recibido\r\n"); //Me falta ponerle Mutex
-				}
-			}
-		}
-	}
+      if(rx_len > 0) {
+        debug_validate(hc12_rx_buffer, rx_len);
+        type = validate_message(hc12_rx_buffer, rx_len);
+
+        if(type != INVALID_PKG) {
+          aux_rx_message.node_id = hc12_rx_buffer[0];
+          aux_rx_message.msg_type = type;
+          memcpy(aux_rx_message.payload, &hc12_rx_buffer[1], rx_len - 1);
+          aux_rx_message.payload_len = rx_len - 1;
+
+          osSemaphoreRelease(rxValidPacketSemHandle);
+          osMessageQueuePut(rxMsgQueueHandle, &aux_rx_message, 0, 0);
+
+          print_debug("RX válido procesado\r\n");
+        } else {
+          print_debug("Paquete inválido recibido\r\n");
+        }
+      }
+      //Reiniciar recepción
+      hc12_rx_len = 0;
+      HC12_StartRxIdle(&huart4, hc12_rx_buffer, HC12_MAX_SIZE);
+      osMutexRelease(hc12MutexHandle);
+      osDelay(100);
+    }
+  }
 }
 
-void LoRa_Tx_Task(void *argument) {
-	TxCommand tx_cmd;
-	uint8_t cmd = 0xFF;
-	uint8_t node_index = 0xFF;
-	uint8_t baliza_id = 0;
-	char debug_msg[80];
+void HC12_Tx_Task(void *argument) {
+  TxCommand tx_cmd;
+  uint8_t cmd = 0xFF;
+  uint8_t node_index = 0xFF;
+  uint8_t baliza_id = 0;
+  char debug_msg[80];
 
-	for(;;){
-		osDelay(50);
-		//Obtener nuevo comando solo si no hay pendiente
-		osMutexAcquire(centralRetxMutexHandle, osWaitForever);
-		if (central_retx.pending_cmd == 0xFF && osMessageQueueGet(txCmdQueueHandle, &tx_cmd, NULL, 10) == osOK) {
-			central_retx.pending_cmd = tx_cmd.cmd;
-			central_retx.pending_node_index = tx_cmd.node_index;
-			central_retx.retry_count = 0;
-		}
-		osMutexRelease(centralRetxMutexHandle);
+  for(;;){
+    osDelay(50);
 
-		//Reintentar actual
-		osMutexAcquire(centralRetxMutexHandle, osWaitForever);
-		if (central_retx.pending_cmd != 0xFF && central_retx.retry_count < MAX_RETRIES) {
-			cmd = central_retx.pending_cmd;
-			node_index = central_retx.pending_node_index;
-			central_retx.retry_count++;
-			osMutexRelease(centralRetxMutexHandle);
+    osMutexAcquire(centralRetxMutexHandle, osWaitForever);
+    if (central_retx.pending_cmd == 0xFF && osMessageQueueGet(txCmdQueueHandle, &tx_cmd, NULL, 10) == osOK) {
+      central_retx.pending_cmd = tx_cmd.cmd;
+      central_retx.pending_node_index = tx_cmd.node_index;
+      central_retx.retry_count = 0;
+    }
+    osMutexRelease(centralRetxMutexHandle);
 
-			osMutexAcquire(loraMutexHandle, osWaitForever);
-			osMutexAcquire(hiveMasterMutexHandle, osWaitForever);
+    // Reintentar actual
+    osMutexAcquire(centralRetxMutexHandle, osWaitForever);
+    if (central_retx.pending_cmd != 0xFF && central_retx.retry_count < MAX_RETRIES) {
+      cmd = central_retx.pending_cmd;
+      node_index = central_retx.pending_node_index;
+      central_retx.retry_count++;
+      osMutexRelease(centralRetxMutexHandle);
 
-			baliza_id = hiveMaster.honeycombs[node_index].baliza_id;
+      osMutexAcquire(hc12MutexHandle, osWaitForever);
+      osMutexAcquire(hiveMasterMutexHandle, osWaitForever);
 
-			switch (cmd) {
-			  case 0:
-					hiveMaster.tx_buffer[0] = baliza_id;
-					hiveMaster.tx_buffer[1] = 0xAA;
-					hiveMaster.tx_buffer[2] = hiveMaster.honeycombs[node_index].node_role;
-					LoRa_transmit(&myLoRa, hiveMaster.tx_buffer, CENTRAL_CONNECTION_PKG_SIZE, 1000);
-					sprintf(debug_msg, "CONNECTION_ACK to %d role=%d (retry %d)\r\n",
-						baliza_id, hiveMaster.honeycombs[node_index].node_role, central_retx.retry_count);
-			  break;
-		  	  case 1:
-		  		  hiveMaster.tx_buffer[0] = baliza_id;
-		  		  hiveMaster.tx_buffer[1] = DETECTION_ACK_CMD;
-		  		  LoRa_transmit(&myLoRa, hiveMaster.tx_buffer, DETECTION_ACK_PKG_SIZE, 500);
-				  sprintf(debug_msg, "DETECTION_ACK to %d (retry %d)\r\n", baliza_id, central_retx.retry_count);
-			  break;
-		  	  case 2:
-		  		  hiveMaster.tx_buffer[0] = baliza_id;
-		  		  hiveMaster.tx_buffer[1] = DRONE_LOST_ACK_CMD;
-		  		  LoRa_transmit(&myLoRa, hiveMaster.tx_buffer, DRONE_LOST_ACK_PKG_SIZE, 500);
-				  sprintf(debug_msg, "DRONE_LOST_ACK to %d (retry %d)\r\n", baliza_id, central_retx.retry_count);
-			  break;
-		  	  case 3:
-		  		  hiveMaster.tx_buffer[0] = baliza_id;
-		  		  hiveMaster.tx_buffer[1] = SLEEP_CMD;
-		  		  LoRa_transmit(&myLoRa, hiveMaster.tx_buffer, SLEEP_CMD_PKG_SIZE, 500);
-				  sprintf(debug_msg, "SLEEP_CMD to %d (retry %d)\r\n", baliza_id, central_retx.retry_count);
-			  break;
-		  	  case 4:
-		  		  hiveMaster.tx_buffer[0] = baliza_id;
-		  		  hiveMaster.tx_buffer[1] = WKP_CMD;
-				  LoRa_transmit(&myLoRa, hiveMaster.tx_buffer, WKP_CMD_PKG_SIZE, 500);
-				  sprintf(debug_msg, "WKP_CMD to %d (retry %d)\r\n", baliza_id, central_retx.retry_count);
-			  break;
-		  	  case 5:
-		  		  hiveMaster.tx_buffer[0] = baliza_id;
-		  		  hiveMaster.tx_buffer[1] = ENERGY_ACK_CMD;
-		  		  LoRa_transmit(&myLoRa, hiveMaster.tx_buffer, 2, 500);
-		  		  sprintf(debug_msg, "ENERGY_ACK to %d (retry %d)\r\n", baliza_id, central_retx.retry_count);
-		  	  break;
-		  	  case 6:
-		  		  hiveMaster.tx_buffer[0] = baliza_id;
-		  		  hiveMaster.tx_buffer[1] = GPS_ACK_CMD;
-		  		  LoRa_transmit(&myLoRa, hiveMaster.tx_buffer, 2, 500);
-		  		  sprintf(debug_msg, "GPS_ACK to %d (retry %d)\r\n", baliza_id, central_retx.retry_count);
-			  break;
-			}
+      baliza_id = hiveMaster.honeycombs[node_index].baliza_id;
 
-			osMutexRelease(hiveMasterMutexHandle);
-			osMutexRelease(loraMutexHandle);
-			print_debug(debug_msg);
-			osDelay(500);
-		}
-		else if (central_retx.pending_cmd != 0xFF && central_retx.retry_count >= MAX_RETRIES) {
-			sprintf(debug_msg, "TX Completed: cmd %d to node %d (3 retries)\r\n",
-					central_retx.pending_cmd, hiveMaster.honeycombs[central_retx.pending_node_index].baliza_id);
-			osMutexRelease(centralRetxMutexHandle);
-			print_debug(debug_msg);
+      switch (cmd) {
+        case 0:  // CONNECTION_ACK
+          HC12_SendConnectionACK(&huart4, baliza_id, hiveMaster.honeycombs[node_index].node_role);
+          sprintf(debug_msg, "CONNECTION_ACK to %d role=%d (retry %d)\r\n",
+            baliza_id, hiveMaster.honeycombs[node_index].node_role, central_retx.retry_count);
+          break;
+        case 1:  // DETECTION_ACK
+          HC12_SendDetectionACK(&huart4, baliza_id);
+          sprintf(debug_msg, "DETECTION_ACK to %d (retry %d)\r\n", baliza_id, central_retx.retry_count);
+          break;
+        case 2:  // DRONE_LOST_ACK
+          HC12_SendDroneLostACK(&huart4, baliza_id);
+          sprintf(debug_msg, "DRONE_LOST_ACK to %d (retry %d)\r\n", baliza_id, central_retx.retry_count);
+          break;
+        case 3:  // SLEEP_CMD
+          HC12_SendSleepCmd(&huart4, baliza_id);
+          sprintf(debug_msg, "SLEEP_CMD to %d (retry %d)\r\n", baliza_id, central_retx.retry_count);
+          break;
+        case 4:  // WKP_CMD
+          HC12_SendWakeCmd(&huart4, baliza_id);
+          sprintf(debug_msg, "WKP_CMD to %d (retry %d)\r\n", baliza_id, central_retx.retry_count);
+          break;
+        case 5:  // ENERGY_ACK
+          HC12_SendEnergyACK(&huart4, baliza_id);
+          sprintf(debug_msg, "ENERGY_ACK to %d (retry %d)\r\n", baliza_id, central_retx.retry_count);
+          break;
+        case 6:  // GPS_ACK
+          HC12_SendGpsACK(&huart4, baliza_id);
+          sprintf(debug_msg, "GPS_ACK to %d (retry %d)\r\n", baliza_id, central_retx.retry_count);
+          break;
+        default:
+          sprintf(debug_msg, "Unknown command %d\r\n", cmd);
+          break;
+      }
 
-			osMutexAcquire(centralRetxMutexHandle, osWaitForever);
-			central_retx.pending_cmd = 0xFF;
-			central_retx.pending_node_index = 0xFF;
-			central_retx.retry_count = 0;
-			osMutexRelease(centralRetxMutexHandle);
-		}
-		else {
-			osMutexRelease(centralRetxMutexHandle);
-		}
-	}
+      osMutexRelease(hiveMasterMutexHandle);
+      osMutexRelease(hc12MutexHandle);
+      print_debug(debug_msg);
+      osDelay(500);
+    }
+    else if (central_retx.pending_cmd != 0xFF && central_retx.retry_count >= MAX_RETRIES) {
+      sprintf(debug_msg, "TX Completed: cmd %d to node %d (3 retries)\r\n",
+        central_retx.pending_cmd, hiveMaster.honeycombs[central_retx.pending_node_index].baliza_id);
+      osMutexRelease(centralRetxMutexHandle);
+      print_debug(debug_msg);
+
+      osMutexAcquire(centralRetxMutexHandle, osWaitForever);
+      central_retx.pending_cmd = 0xFF;
+      central_retx.pending_node_index = 0xFF;
+      central_retx.retry_count = 0;
+      osMutexRelease(centralRetxMutexHandle);
+    }
+    else {
+      osMutexRelease(centralRetxMutexHandle);
+    }
+  }
 }
 
 void Node_Update_Task(void *argument) {
@@ -796,7 +760,7 @@ void Node_Update_Task(void *argument) {
 
 	for(;;) {
 		//Solo actualizamos cuando llega un paquete valido a procesar
-		if (osSemaphoreAcquire(rxValidPacketSemHandle, osWaitForever) == osOK) {
+		if (osSemaphoreAcquire(rxValidPacketSemHandle, 5000) == osOK) {
 			osMessageQueueGet(rxMsgQueueHandle, &aux_rx_message, 0, 0);  // AGREGAR ESTA LÍNEA
 			osMutexAcquire(hiveMasterMutexHandle, osWaitForever);
 
@@ -814,6 +778,7 @@ void Node_Update_Task(void *argument) {
 				sprintf(debug_msg, "ERROR: Node%d not in hive\r\n", aux_rx_message.node_id);
 				print_debug(debug_msg);
 				osMutexRelease(hiveMasterMutexHandle);
+				continue;
 			}
 
 			if(aux_rx_message.msg_type == CONNECTION_PKG) {
@@ -1247,12 +1212,18 @@ void send_station_status(uint8_t station_id, float_t lat, float_t lon, float_t a
 }
 
 
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
-	if (GPIO_Pin == LoRa_IRQ_Pin) {
-		osSemaphoreRelease(loraRxSemHandle);
-		HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);
-		print_debug_F("LORA_RX callback\r\n");
-	}
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size) {
+  if (huart == &huart4) {
+    uint32_t event = HAL_UARTEx_GetRxEventType(huart);
+
+    if (event == HAL_UART_RXEVENT_IDLE) {  // Solo procesar IDLE
+      osMutexAcquire(hc12MutexHandle, 0);
+      hc12_rx_len = Size;
+      osMutexRelease(hc12MutexHandle);
+      osSemaphoreRelease(hc12RxSemHandle);
+    }
+    // Ignorar Half Transfer (HT) y otras interrupciones DMA
+  }
 }
 
 /* USER CODE END 4 */

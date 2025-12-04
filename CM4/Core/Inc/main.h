@@ -59,14 +59,8 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define LED_VERDE_Pin GPIO_PIN_0
 #define LED_VERDE_GPIO_Port GPIOB
-#define SPI1_RST_Pin GPIO_PIN_13
-#define SPI1_RST_GPIO_Port GPIOE
 #define LED_ROJO_Pin GPIO_PIN_14
 #define LED_ROJO_GPIO_Port GPIOB
-#define SPI1_SS_LoRa_Pin GPIO_PIN_14
-#define SPI1_SS_LoRa_GPIO_Port GPIOD
-#define LoRa_IRQ_Pin GPIO_PIN_14
-#define LoRa_IRQ_GPIO_Port GPIOG
 #define LED_AMARILLO_Pin GPIO_PIN_1
 #define LED_AMARILLO_GPIO_Port GPIOE
 
@@ -120,6 +114,7 @@ typedef enum {							//Señales que avisan que tipo de dato mandamos
 } TX_TYPE;
 
 typedef enum {							//Señales que avisan que tipo de dato mandamos
+	undefined,
 	detector,
 	aux,
 } system_role;
